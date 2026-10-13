@@ -1,0 +1,20 @@
+/* Design tokens shared by every Photocrap page. */
+:root {
+  --bg: #0f1115;
+  --bg-2: #161922;
+  --panel: #1c202b;
+  --panel-2: #232836;
+  --border: #2c3242;
+  --text: #e8eaf0;
+  --muted: #9aa1b3;
+  --accent: #3d8bfd;
+  --accent-2: #7c5cff;
+  --workspace: #0b0d11;
+  --radius: 12px;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+[hidden] { display: none !important; }

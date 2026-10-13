@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Photocrap Editor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/editor.css">
+</head>
+<body class="editor">
+  <div class="app">
+  <header class="menubar">
+    <a class="brand" href="index.html" title="Photocrap home"><span class="brand-mark" aria-hidden="true"></span></a>
+    <nav class="menus" id="menus" aria-label="Menu"></nav>
+    <div class="menubar-right">
+      <span class="doc-name" id="doc-name"></span>
+      <button class="icon-btn panels-toggle" id="toggle-panels" type="button" title="Toggle panels" aria-label="Toggle panels">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="optionsbar" id="optionsbar"></div>
+
+  <div class="main">
+    <aside class="toolbar" id="toolbar" aria-label="Tools"></aside>
+    <div class="workspace" id="workspace">
+      <canvas id="view"></canvas>
+    </div>
+    <aside class="panels" id="panels">
+      <section class="panel panel-layers" id="layers-panel" aria-label="Layers"></section>
+      <section class="panel panel-history" id="history-panel" aria-label="History"></section>
+    </aside>
+  </div>
+
+  <footer class="statusbar" id="statusbar"></footer>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script type="module" src="js/editor/main.js"></script>
+</body>
+</html>

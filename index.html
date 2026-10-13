@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Photocrap — Photo editing in your browser</title>
+  <meta name="description" content="A free, layer-based photo editor that runs entirely in your browser. No installs, no uploads.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/home.css">
+</head>
+<body>
+  <header class="nav">
+    <a class="brand" href="index.html">
+      <span class="brand-mark" aria-hidden="true"></span>
+      Photocrap
+    </a>
+    <nav class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#shortcuts">Shortcuts</a>
+      <a href="#privacy">Privacy</a>
+    </nav>
+    <a class="btn btn-primary btn-sm" href="editor.html">Open editor</a>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Free · No install · Runs locally</p>
+        <h1>Serious photo editing, right in your browser.</h1>
+        <p class="lede">Layers, brushes, selections, filters and adjustments — a familiar workspace that opens instantly and never uploads your images.</p>
+
+        <a id="resume" class="resume" href="editor.html" hidden>
+          <img id="resume-thumb" alt="">
+          <span class="resume-text">
+            <strong>Continue where you left off</strong>
+            <span id="resume-meta"></span>
+          </span>
+          <span class="resume-arrow" aria-hidden="true">→</span>
+        </a>
+
+        <div class="cta-row">
+          <a class="btn btn-primary" href="editor.html?new=1">New canvas</a>
+          <label class="btn btn-ghost" for="file-input">Open image…</label>
+          <input id="file-input" type="file" accept="image/*,.pcrap" hidden>
+        </div>
+
+        <div id="dropzone" class="dropzone" tabindex="0">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Drop an image anywhere to start editing</span>
+          <small>PNG, JPEG, WebP, GIF — or a .pcrap project</small>
+        </div>
+      </div>
+
+      <!-- Static mock of the editor workspace -->
+      <div class="mock" aria-hidden="true">
+        <div class="mock-menubar">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="menu">File</span><span class="menu">Edit</span><span class="menu">Image</span><span class="menu">Layer</span><span class="menu">Filter</span>
+        </div>
+        <div class="mock-body">
+          <div class="mock-tools">
+            <i class="t active"></i><i class="t"></i><i class="t"></i><i class="t"></i><i class="t"></i><i class="t"></i><i class="t"></i>
+            <i class="swatch fg"></i><i class="swatch bg"></i>
+          </div>
+          <div class="mock-canvas">
+            <div class="photo">
+              <div class="sun"></div>
+              <div class="mtn back"></div>
+              <div class="mtn front"></div>
+              <div class="marquee"></div>
+            </div>
+          </div>
+          <div class="mock-panels">
+            <div class="panel-title">Adjustments</div>
+            <div class="slider"><span style="--v:62%"></span></div>
+            <div class="slider"><span style="--v:40%"></span></div>
+            <div class="slider"><span style="--v:75%"></span></div>
+            <div class="panel-title">Layers</div>
+            <div class="layer active"><i class="thumb a"></i>Sun glow</div>
+            <div class="layer"><i class="thumb b"></i>Mountains</div>
+            <div class="layer"><i class="thumb c"></i>Background</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="section">
+      <h2>Everything you reach for, nothing you have to install</h2>
+      <div class="features">
+        <article class="feature">
+          <div class="icon">▤</div>
+          <h3>Layers & blend modes</h3>
+          <p>Stack, reorder, hide and set opacity. Multiply, screen, overlay and more.</p>
+        </article>
+        <article class="feature">
+          <div class="icon">✎</div>
+          <h3>Brush, eraser & fill</h3>
+          <p>Pressure-friendly brushes with size, hardness and opacity controls.</p>
+        </article>
+        <article class="feature">
+          <div class="icon">⬚</div>
+          <h3>Selections</h3>
+          <p>Rectangle, ellipse, lasso and magic wand. Cut, copy, move and transform.</p>
+        </article>
+        <article class="feature">
+          <div class="icon">◐</div>
+          <h3>Adjustments</h3>
+          <p>Brightness, contrast, hue/saturation, levels, curves and color balance.</p>
+        </article>
+        <article class="feature">
+          <div class="icon">✦</div>
+          <h3>Filters</h3>
+          <p>Blur, sharpen, noise, grayscale, sepia, invert and pixelate.</p>
+        </article>
+        <article class="feature">
+          <div class="icon">↶</div>
+          <h3>Deep history</h3>
+          <p>Step back through hundreds of changes. Undo and redo without fear.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="shortcuts" class="section split">
+      <div>
+        <h2>Your muscle memory still works</h2>
+        <p class="muted">Familiar keyboard shortcuts so you can work at full speed from the first minute.</p>
+      </div>
+      <dl class="keys">
+        <div><dt><kbd>V</kbd></dt><dd>Move</dd></div>
+        <div><dt><kbd>M</kbd></dt><dd>Marquee</dd></div>
+        <div><dt><kbd>B</kbd></dt><dd>Brush</dd></div>
+        <div><dt><kbd>E</kbd></dt><dd>Eraser</dd></div>
+        <div><dt><kbd>Ctrl</kbd><kbd>Z</kbd></dt><dd>Undo</dd></div>
+        <div><dt><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>Z</kbd></dt><dd>Redo</dd></div>
+        <div><dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Brush size</dd></div>
+        <div><dt><kbd>Space</kbd></dt><dd>Pan</dd></div>
+      </dl>
+    </section>
+
+    <section id="privacy" class="section privacy">
+      <h2>Your photos never leave your device</h2>
+      <p class="muted">All editing happens in your browser using the Canvas API. There are no accounts, no servers processing your images, and nothing to upload. Your work is saved automatically in this browser, so you can close the tab and pick up right where you left off.</p>
+      <a class="btn btn-primary" href="editor.html">Start editing</a>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>© <span id="year"></span> Photocrap</span>
+    <span class="muted">Made with HTML, CSS & Canvas</span>
+  </footer>
+
+  <div id="drop-overlay" class="drop-overlay" hidden>Drop to open in the editor</div>
+
+  <script type="module" src="js/home.js"></script>
+</body>
+</html>
