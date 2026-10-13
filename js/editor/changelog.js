@@ -8,6 +8,27 @@ import { kvGet } from "../storage.js";
 
 export const CHANGELOG = [
   {
+    version: "0.13.0",
+    title: "A much better Shape tool",
+    notes: [
+      "More shapes: triangle, star, arrow, heart and speech bubble join rectangle, ellipse, polygon and line, picked from icons in the options bar.",
+      "Shapes stay live: change a rectangle's corners, a polygon's sides or a star's points and indent at any time, from the options bar or the Properties panel — even after moving, resizing, rotating or flipping it.",
+      "Edit on the canvas: the selected shape shows handles to resize it, and rectangles get a corner widget to drag their roundness.",
+      "Click without dragging to create a shape at an exact size.",
+      "Dashed and dotted strokes, and arrowheads on lines.",
+      "Flip Layer keeps shape layers as editable shapes instead of turning them into pixels.",
+      "Toolbar buttons that hold more tools have a clearer corner triangle — click it, right-click the button or press and hold — and their tooltip lists the tools inside.",
+    ],
+  },
+  {
+    version: "0.12.0",
+    title: "Smart guides and locked guides",
+    notes: [
+      "Smart guides: when you move a layer (or draw a marquee or shape), it snaps to the edges and centers of the other layers, and a pink line shows what it lined up with. View › Turn Smart Guides Off to disable.",
+      "View › Lock Guides (Ctrl+Alt+;) keeps guides from being moved or deleted by accident. New guides can still be dragged out of the rulers.",
+    ],
+  },
+  {
     version: "0.11.1",
     title: "Tidier toolbar, one-click layout reset",
     notes: [

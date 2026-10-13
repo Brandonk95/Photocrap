@@ -18,7 +18,7 @@ export function loadViewPrefs() {
   return { ...DEFAULT_VIEW_PREFS, ...saved };
 }
 
-export const DEFAULT_VIEW_PREFS = { rulers: true, guides: true, snap: true };
+export const DEFAULT_VIEW_PREFS = { rulers: true, guides: true, snap: true, smartGuides: true, lockGuides: false };
 
 export function saveViewPrefs(prefs) {
   try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ }
@@ -26,51 +26,84 @@ export function saveViewPrefs(prefs) {
 
 // ---------- Snapping ----------
 
-// Positions on one axis that things snap to: the canvas edges and center,
-// and the guides (when shown).
-function targets(app, axis) {
+// Smart guides: the edges and centers of the other visible layers. Measured
+// once per drag (app.smartCache is cleared when a drag starts).
+function layerTargets(app, exclude) {
+  const key = exclude ? `x${exclude.id}` : "all";
+  app.smartCache ??= {};
+  if (app.smartCache[key]) return app.smartCache[key];
+  const doc = app.doc;
+  const skip = new Set(exclude ? [exclude, ...(exclude.isGroup ? doc.allNodes(exclude.layers) : [])] : []);
+  const out = { x: [], y: [] };
+  for (const n of doc.leaves()) {
+    if (skip.has(n) || n.adjustment || !doc.isVisible(n)) continue;
+    const b = app.contentBoundsOf(n);
+    if (!b) continue;
+    for (const pos of [b.x, b.x + b.w / 2, b.x + b.w]) out.x.push({ pos, span: [b.y, b.y + b.h] });
+    for (const pos of [b.y, b.y + b.h / 2, b.y + b.h]) out.y.push({ pos, span: [b.x, b.x + b.w] });
+  }
+  return (app.smartCache[key] = out);
+}
+
+// What things snap to on one axis: the canvas edges and center, guides
+// (when shown) and, with smart guides on, other layers. Each target is
+// { pos, span? } — span is its extent along the other axis, for drawing.
+function targets(app, axis, exclude) {
   const doc = app.doc, size = axis === "x" ? doc.width : doc.height;
-  const t = [0, size / 2, size];
+  const t = [0, size / 2, size].map((pos) => ({ pos }));
   const dragging = app.gesture?.type === "guide" ? doc.guides[app.gesture.index] : null; // not onto itself
-  if (app.prefs.guides) for (const g of doc.guides) if (g.axis === axis && g !== dragging) t.push(g.pos);
+  if (app.prefs.guides) for (const g of doc.guides) if (g.axis === axis && g !== dragging) t.push({ pos: g.pos });
+  if (app.prefs.smartGuides && app.gesture?.type !== "guide") t.push(...layerTargets(app, exclude)[axis]);
   return t;
 }
 
 // The offset that brings the closest of `values` onto a target, or 0.
-// Remembers the target so the view can draw a snap line.
-export function snapOffset(app, axis, values) {
+// Remembers what it snapped to so the view can draw it: a full-length line
+// for the canvas and guides, and for a layer a line spanning both objects.
+// `extent` is the moving thing's [min, max] along the other axis.
+export function snapOffset(app, axis, values, { exclude = null, extent = null } = {}) {
   if (!app.prefs.snap || !app.doc) return 0;
   const tol = SNAP_PX / app.view.zoom;
   let best = null;
   for (const v of values) {
-    for (const t of targets(app, axis)) {
-      const d = t - v;
-      if (Math.abs(d) <= tol && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, t };
+    for (const t of targets(app, axis, exclude)) {
+      const d = t.pos - v;
+      if (Math.abs(d) <= tol && (!best || Math.abs(d) < Math.abs(best.d) - 1e-9)) best = { d, t };
     }
   }
-  if (best) app.snapLines[axis] = best.t;
-  else delete app.snapLines[axis];
-  return best ? best.d : 0;
+  if (!best) {
+    delete app.snapLines[axis];
+    return 0;
+  }
+  const { pos, span } = best.t;
+  app.snapLines[axis] = span && extent
+    ? { pos, from: Math.min(span[0], extent[0]), to: Math.max(span[1], extent[1]) }
+    : { pos };
+  return best.d;
 }
 
 // Snap a document point.
 export function snapPoint(app, p) {
-  return { ...p, x: p.x + snapOffset(app, "x", [p.x]), y: p.y + snapOffset(app, "y", [p.y]) };
+  return {
+    ...p,
+    x: p.x + snapOffset(app, "x", [p.x], { extent: [p.y, p.y] }),
+    y: p.y + snapOffset(app, "y", [p.y], { extent: [p.x, p.x] }),
+  };
 }
 
 // How far to shift a box so its edges or center land on a target.
-export function snapBox(app, b) {
-  return {
-    dx: snapOffset(app, "x", [b.x, b.x + b.w / 2, b.x + b.w]),
-    dy: snapOffset(app, "y", [b.y, b.y + b.h / 2, b.y + b.h]),
-  };
+// `exclude` is the layer being moved (it mustn't snap to itself).
+export function snapBox(app, b, exclude = null) {
+  const dx = snapOffset(app, "x", [b.x, b.x + b.w / 2, b.x + b.w], { exclude, extent: [b.y, b.y + b.h] });
+  const dy = snapOffset(app, "y", [b.y, b.y + b.h / 2, b.y + b.h], { exclude, extent: [b.x, b.x + b.w] });
+  return { dx, dy };
 }
 
 // ---------- Guides ----------
 
 // The guide under a screen point, as an index into doc.guides, or -1.
 export function guideAt(app, sx, sy) {
-  if (!app.prefs.guides || !app.doc) return -1;
+  if (!app.prefs.guides || app.prefs.lockGuides || !app.doc) return -1; // locked guides can't be grabbed
   const { zoom, x, y } = app.view;
   let best = -1, bd = GUIDE_HIT_PX + 1;
   app.doc.guides.forEach((g, i) => {
@@ -104,18 +137,20 @@ export function drawGuides(app, ctx) {
   const { zoom, x, y } = app.view;
   ctx.save();
   ctx.lineWidth = 1;
-  const line = (axis, pos, color, dash) => {
+  // A line across the view at `pos`, or only between from and to (document
+  // coordinates along the other axis).
+  const line = (axis, pos, color, dash, from, to) => {
     ctx.strokeStyle = color;
     ctx.setLineDash(dash ?? []);
     ctx.beginPath();
     if (axis === "x") {
       const sx = Math.round(x + pos * zoom) + 0.5;
-      ctx.moveTo(sx, 0);
-      ctx.lineTo(sx, app.cssH);
+      ctx.moveTo(sx, from == null ? 0 : y + from * zoom);
+      ctx.lineTo(sx, to == null ? app.cssH : y + to * zoom);
     } else {
       const sy = Math.round(y + pos * zoom) + 0.5;
-      ctx.moveTo(0, sy);
-      ctx.lineTo(app.cssW, sy);
+      ctx.moveTo(from == null ? 0 : x + from * zoom, sy);
+      ctx.lineTo(to == null ? app.cssW : x + to * zoom, sy);
     }
     ctx.stroke();
   };
@@ -127,9 +162,13 @@ export function drawGuides(app, ctx) {
   }
   const g = app.gesture;
   if (g?.type === "guide" && g.pos != null && !g.remove) line(g.axis, g.pos, GUIDE_COLOR);
-  // While dragging, show what snapped.
+  // While dragging, show what snapped: smart guides solid between the two
+  // objects, the canvas and guides dashed across the view.
   if (g && g.type !== "pan") {
-    for (const axis of ["x", "y"]) if (app.snapLines[axis] != null) line(axis, app.snapLines[axis], SNAP_COLOR, [4, 3]);
+    for (const axis of ["x", "y"]) {
+      const s = app.snapLines[axis];
+      if (s) line(axis, s.pos, SNAP_COLOR, s.from == null ? [4, 3] : [], s.from, s.to);
+    }
   }
   ctx.restore();
 }

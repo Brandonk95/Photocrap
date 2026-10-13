@@ -7,7 +7,7 @@ import { h } from "./util.js";
 import { buildField } from "./dialogs.js";
 import { adjustmentFields, adjustmentLabel } from "./commands.js";
 import { renderText } from "./text.js";
-import { renderShape } from "./shapes.js";
+import { renderShape, withLive } from "./shapes.js";
 
 const FONTS = ["Inter", "Arial", "Helvetica", "Georgia", "Times New Roman", "Courier New", "Verdana", "Impact", "Comic Sans MS"];
 
@@ -133,24 +133,49 @@ export function buildPropertiesPanel(app, commands) {
   }
 
   function shapeSection(layer) {
-    const s = layer.shape;
-    return section("Appearance", [
-      { key: "fillOn", label: "Fill", type: "checkbox", value: !!s.fill },
-      { key: "fill", label: "Fill color", type: "color", value: s.fill ?? s.lastFill ?? "#000000" },
-      { key: "strokeOn", label: "Stroke", type: "checkbox", value: !!s.stroke },
-      { key: "stroke", label: "Stroke color", type: "color", value: s.stroke ?? s.lastStroke ?? "#000000" },
-      { key: "strokeWidth", label: "Stroke width", type: "range", min: 0, max: 100, value: s.strokeWidth ?? 0, unit: "px" },
-    ], (v) => {
+    const s = layer.shape, live = s.live, open = !s.closed;
+    const restyle = (fn) => {
       if (app.refuseLocked(layer, "pixels")) return;
       edit("Edit Shape", [layer], () => {
-        layer.shape = {
-          ...layer.shape,
-          fill: v.fillOn ? v.fill : null, stroke: v.strokeOn ? v.stroke : null, strokeWidth: v.strokeWidth,
-          lastFill: v.fill, lastStroke: v.stroke,
-        };
+        layer.shape = fn(layer.shape);
         renderShape(layer, app.doc);
       });
-    });
+    };
+    // A live shape's own settings (corner radius, sides, points…).
+    const geometry = [];
+    if (live?.type === "rect" || live?.type === "bubble") geometry.push({ key: "radius", label: "Corners", type: "range", min: 0, max: Math.round(Math.min(live.w, live.h) / 2), value: Math.round(live.radius ?? 0), unit: "px" });
+    if (live?.type === "polygon") geometry.push({ key: "sides", label: "Sides", type: "range", min: 3, max: 24, value: live.sides });
+    if (live?.type === "star") {
+      geometry.push({ key: "sides", label: "Points", type: "range", min: 3, max: 24, value: live.sides });
+      geometry.push({ key: "indent", label: "Indent", type: "range", min: 5, max: 95, value: Math.round((1 - live.inner) * 100), unit: "%" });
+    }
+    if (live) geometry.push({ key: "angle", label: "Angle", type: "range", min: -180, max: 180, value: Math.round(live.angle ?? 0), unit: "°" });
+    const shapeFields = geometry.length
+      ? section("Shape", geometry, (v, key) => restyle((sh) => withLive(sh, key === "indent" ? { inner: 1 - v.indent / 100 } : { [key]: v[key] })))
+      : null;
+
+    const appearance = section("Appearance", [
+      ...(open ? [] : [
+        { key: "fillOn", label: "Fill", type: "checkbox", value: !!s.fill },
+        { key: "fill", label: "Fill color", type: "color", value: s.fill ?? s.lastFill ?? "#000000" },
+        { key: "strokeOn", label: "Stroke", type: "checkbox", value: !!s.stroke },
+      ]),
+      { key: "stroke", label: open ? "Color" : "Stroke color", type: "color", value: s.stroke ?? s.lastStroke ?? "#000000" },
+      { key: "strokeWidth", label: open ? "Width" : "Stroke width", type: "range", min: 0, max: 100, value: Math.round(s.strokeWidth ?? 0), unit: "px" },
+      { key: "dash", label: "Style", type: "select", options: [["solid", "Solid"], ["dashed", "Dashed"], ["dotted", "Dotted"]], value: s.dash ?? "solid" },
+      ...(open ? [
+        { key: "arrowStart", label: "Start arrow", type: "checkbox", value: !!s.arrowStart },
+        { key: "arrowEnd", label: "End arrow", type: "checkbox", value: !!s.arrowEnd },
+      ] : []),
+    ], (v) => restyle((sh) => ({
+      ...sh,
+      fill: open ? null : v.fillOn ? v.fill : null,
+      stroke: open || v.strokeOn ? v.stroke : null,
+      strokeWidth: v.strokeWidth, dash: v.dash,
+      arrowStart: open ? v.arrowStart : sh.arrowStart, arrowEnd: open ? v.arrowEnd : sh.arrowEnd,
+      lastFill: open ? sh.lastFill : v.fill, lastStroke: v.stroke,
+    })));
+    return h("div", { class: "props-section" }, shapeFields, appearance);
   }
 
   function adjustmentSection(layer) {

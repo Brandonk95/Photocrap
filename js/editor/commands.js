@@ -30,7 +30,7 @@ export const MENUS = [
   ]],
   ["Select", ["select.all", "select.none", "select.inverse", "-", "select.refine", "select.quickMask", "-", "#Modify", "select.feather", "select.expand", "select.contract"]],
   ["Filter", ["filter.blur", "filter.sharpen", "filter.noise", "filter.pixelate"]],
-  ["View", ["view.zoomIn", "view.zoomOut", "view.fit", "view.actual", "-", "view.rulers", "view.guides", "view.snap", "view.newGuide", "view.clearGuides", "-", "view.toolbar", "view.options", "view.properties", "view.panels", "-", "view.resetLayout"]],
+  ["View", ["view.zoomIn", "view.zoomOut", "view.fit", "view.actual", "-", "view.rulers", "view.guides", "view.lockGuides", "view.newGuide", "view.clearGuides", "-", "view.snap", "view.smartGuides", "-", "view.toolbar", "view.options", "view.properties", "view.panels", "-", "view.resetLayout"]],
   ["Help", ["help.shortcuts", "help.whatsNew"]],
 ];
 
@@ -792,6 +792,14 @@ export function createCommands(app, tools) {
     "view.snap": {
       label: "Snap", run: () => app.setPref("snap", !app.prefs.snap),
       dynamicLabel: () => (app.prefs.snap ? "Turn Snapping Off" : "Turn Snapping On"),
+    },
+    "view.lockGuides": {
+      label: "Lock Guides", keys: "Mod+Alt+;", run: () => app.setPref("lockGuides", !app.prefs.lockGuides),
+      dynamicLabel: () => (app.prefs.lockGuides ? "Unlock Guides" : "Lock Guides"),
+    },
+    "view.smartGuides": {
+      label: "Smart Guides", run: () => app.setPref("smartGuides", !app.prefs.smartGuides),
+      dynamicLabel: () => (app.prefs.smartGuides ? "Turn Smart Guides Off" : "Turn Smart Guides On"),
     },
     "view.newGuide": { label: "New Guide…", run: () => newGuideDialog(app) },
     "view.clearGuides": { label: "Clear Guides", enabled: () => !!app.doc?.guides.length, run: () => app.clearGuides() },

@@ -127,14 +127,16 @@ function buildMenubar(app, commands) {
 function createToolTip() {
   const el = h("div", { class: "tool-tip", role: "tooltip", hidden: true });
   document.body.append(el);
-  let tool = null, anchor = null, alt = false, timer = 0;
+  let tool = null, anchor = null, alt = false, timer = 0, more = null;
 
   function render() {
-    el.replaceChildren(
+    el.replaceChildren(...[
       h("div", { class: "tool-tip-head" }, h("span", {}, tool.name), h("kbd", {}, tool.key)),
       alt && tool.description
         ? h("p", { class: "tool-tip-desc" }, tool.description)
-        : h("p", { class: "tool-tip-hint" }, "Hold Alt for details"));
+        : h("p", { class: "tool-tip-hint" }, "Hold Alt for details"),
+      more ? h("p", { class: "tool-tip-more" }, h("span", { class: "tool-tip-more-label" }, "Right-click or hold for"), ` ${more}`) : null,
+    ].filter(Boolean));
     el.classList.toggle("expanded", alt);
     const r = anchor.getBoundingClientRect();
     el.style.left = `${r.right + 10}px`;
@@ -143,7 +145,9 @@ function createToolTip() {
   }
 
   const api = {
-    show(t, button, altKey) {
+    // others: names of the tools sharing this button, if any.
+    show(t, button, altKey, others = null) {
+      more = others;
       tool = t;
       anchor = button;
       alt = altKey;
@@ -206,7 +210,8 @@ function buildToolbar(app, tools) {
       },
     });
     slot.button = b;
-    b.addEventListener("pointerenter", (e) => tip.show(slot.current, b, e.altKey));
+    const others = () => slot.tools.filter((t) => t !== slot.current).map((t) => t.name).join(", ") || null;
+    b.addEventListener("pointerenter", (e) => tip.show(slot.current, b, e.altKey, others()));
     b.addEventListener("pointerleave", () => {
       tip.hide();
       clearTimeout(longPress);
@@ -217,6 +222,13 @@ function buildToolbar(app, tools) {
     });
     b.addEventListener("pointerdown", (e) => {
       if (e.button !== 0 || slot.tools.length < 2) return;
+      // The corner triangle itself opens the list right away.
+      const r = b.getBoundingClientRect();
+      if (e.clientX > r.right - 12 && e.clientY > r.bottom - 12) {
+        suppressClick = true;
+        openFlyout(slot);
+        return;
+      }
       longPress = setTimeout(() => {
         suppressClick = true;
         openFlyout(slot);
@@ -392,12 +404,16 @@ function renderOption(app, tool, o, rerender) {
         h("select", { onchange: (e) => { s[o.key] = e.target.value; changed(); } },
           o.options.map(([v, l]) => h("option", { value: v, selected: s[o.key] === v }, l))));
     case "segmented":
-      return h("div", { class: "segmented", role: "group" },
-        o.options.map(([v, l]) => h("button", {
+      // Options are [value, label] or [value, label, icon]; icons show the label as a tooltip.
+      return h("div", { class: `segmented${o.options.some((x) => x[2]) ? " icons" : ""}`, role: "group" },
+        o.options.map(([v, l, icon]) => h("button", {
           type: "button",
           class: s[o.key] === v ? "on" : "",
+          title: icon ? l : null,
+          "aria-label": icon ? l : null,
+          html: icon ?? null,
           onclick: () => { s[o.key] = v; changed(); rerender(); },
-        }, l)));
+        }, icon ? null : l)));
     case "color": {
       const swatch = h("button", {
         type: "button", class: "opt-swatch", title: `${o.label} color`, style: `background:${s[o.key]}`,

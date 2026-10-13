@@ -124,7 +124,7 @@ export function createTransformTool() {
     // Lift the content of the edit target (plus its linked mask). Returns
     // false if there is nothing to transform.
     // whole: transform the whole layer even if there is a selection.
-    start(app, prevTool, { whole = false } = {}) {
+    start(app, prevTool, { whole = false, label = "Free Transform" } = {}) {
       const doc = app.doc, sel = whole ? null : doc.selection;
       const { layer, surface: target, isMask } = app.target();
       // Bounds include any content that is already off-canvas.
@@ -134,7 +134,7 @@ export function createTransformTool() {
         return false;
       }
       const linked = app.linkedSurfaces();
-      app.history.begin("Free Transform", linked.map((p) => p.surface));
+      app.history.begin(label, linked.map((p) => p.surface));
       const pieces = linked.map((p) => ({
         ...p,
         float: p.surface.lift(sel, sel ? null : b),
@@ -162,11 +162,20 @@ export function createTransformTool() {
     // Give the layer's content new bounds directly (the Properties panel's
     // X / Y / W / H), with the same rules as a dragged transform.
     setBounds(app, { x, y, w, h }) {
-      if (!this.start(app, app.tool, { whole: true })) return;
+      if (!this.start(app, app.tool, { whole: true, label: "Transform Layer" })) return;
       s.sx = w / s.b.w;
       s.sy = h / s.b.h;
       s.cx = x + w / 2;
       s.cy = y + h / 2;
+      commit(app);
+    },
+
+    // Flip the whole layer ("h" or "v"). Going through the transform keeps
+    // shape layers as editable vectors.
+    flip(app, axis) {
+      if (!this.start(app, app.tool, { whole: true, label: axis === "h" ? "Flip Layer Horizontal" : "Flip Layer Vertical" })) return;
+      if (axis === "h") s.sx = -1;
+      else s.sy = -1;
       commit(app);
     },
 
@@ -209,7 +218,7 @@ export function createTransformTool() {
         // Snap the (unrotated) box to guides and the canvas.
         if (s.angle === 0) {
           const w = Math.abs(s.sx) * s.b.w, h = Math.abs(s.sy) * s.b.h;
-          const snap = snapBox(app, { x: s.cx - w / 2, y: s.cy - h / 2, w, h });
+          const snap = snapBox(app, { x: s.cx - w / 2, y: s.cy - h / 2, w, h }, app.doc.activeLayer);
           s.cx += snap.dx;
           s.cy += snap.dy;
         }

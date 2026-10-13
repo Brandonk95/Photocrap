@@ -1413,7 +1413,7 @@ function moveTool() {
       if (axisLock === "y") dx = 0;
       // Snap the moved box's edges or center to guides and the canvas.
       if (box) {
-        const snap = snapBox(app, { ...box, x: box.x + dx, y: box.y + dy });
+        const snap = snapBox(app, { ...box, x: box.x + dx, y: box.y + dy }, app.doc.activeLayer);
         if (axisLock !== "y") dx += Math.round(snap.dx);
         if (axisLock !== "x") dy += Math.round(snap.dy);
       }

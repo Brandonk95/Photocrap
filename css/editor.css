@@ -235,6 +235,8 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px 
 }
 .segmented button:hover { color: var(--text); }
 .segmented button.on { background: var(--panel-2); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .3); }
+.segmented.icons button { display: grid; place-items: center; padding: 3px 6px; }
+.segmented.icons svg { width: 16px; height: 16px; }
 
 /* ---------- Main area ---------- */
 .main {
@@ -274,12 +276,17 @@ input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px 
 .tool-btn.has-more::after {
   content: "";
   position: absolute;
-  right: 3px; bottom: 3px;
-  border: 3px solid transparent;
+  right: 2px; bottom: 2px;
+  border: 4px solid transparent;
   border-right-color: currentColor;
   border-bottom-color: currentColor;
-  opacity: .6;
+  border-bottom-right-radius: 2px;
+  opacity: .85;
 }
+.tool-btn.has-more:hover::after { color: var(--accent); opacity: 1; }
+.tool-btn.has-more.active::after { color: #fff; }
+.tool-tip-more { margin: 6px 0 0; padding-top: 6px; border-top: 1px solid var(--border); color: var(--text); font-size: 12px; }
+.tool-tip-more-label { color: var(--muted); }
 .tool-flyout { min-width: 210px; }
 .tool-flyout .menu-item { align-items: center; justify-content: flex-start; gap: 10px; }
 .tool-flyout .menu-item .shortcut { margin-left: auto; }

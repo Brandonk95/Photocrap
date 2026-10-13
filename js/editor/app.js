@@ -446,6 +446,7 @@ export class App {
       }
       if (ev.button !== 0 || this.working || (this.history.pending && !this.tool.modal)) return;
       this.snapLines = {};
+      this.smartCache = null; // smart guides re-measure the layers for each drag
       // Drag out of a ruler to make a guide; drag a guide (Move tool, or
       // Ctrl with any tool) to move it, or back onto a ruler to remove it.
       const fromRuler = !this.history.pending && rulerAt(this, e.sx, e.sy);
@@ -947,6 +948,11 @@ export class App {
   flipLayer(axis) {
     const layer = this.doc.activeLayer;
     if (!this.ensureVisible(layer, { whole: true, locks: ["pixels", "position"] })) return;
+    // Whole layers flip through the transform, which keeps shapes as vectors.
+    if (!this.doc.selection) {
+      this.tools.get("transform").flip(this, axis);
+      return;
+    }
     const surfaces = this.linkedSurfaces().map((p) => p.surface);
     this.history.begin(axis === "h" ? "Flip Layer Horizontal" : "Flip Layer Vertical", surfaces);
     this.transformSurfaces(surfaces, this.doc.selection, axis === "h" ? -1 : 1, axis === "v" ? -1 : 1, 0, this.contentBoundsOf(layer));
