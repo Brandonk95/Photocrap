@@ -26,6 +26,8 @@ export async function serializeDoc(doc) {
       type: node.isGroup ? "group" : "layer",
       name: node.name, visible: node.visible, opacity: node.opacity, blend: node.blend,
       active: node === doc.activeLayer || undefined,
+      clipped: node.clipped || undefined,
+      locks: node.locks ?? undefined,
       mask: node.mask
         ? { enabled: node.mask.enabled, editing: node.editMask, x: node.mask.x, y: node.mask.y, background: node.mask.background }
         : null,
@@ -40,6 +42,7 @@ export async function serializeDoc(doc) {
       Object.assign(info, {
         x: node.x, y: node.y,
         text: node.text ?? null,             // editable type; the PNG holds its rendered pixels
+        shape: node.shape ?? null,           // editable vector shape
         adjustment: node.adjustment ?? null, // adjustment layer settings
         styles: node.styles ?? null,         // layer effects
       });
@@ -50,11 +53,12 @@ export async function serializeDoc(doc) {
   };
   const meta = {
     format: "photocrap",
-    version: 4,
+    version: 5,
     name: doc.name,
     width: doc.width,
     height: doc.height,
     layers: doc.layers.map(describe),
+    guides: doc.guides.length ? doc.guides : undefined,
   };
   // Replace the canvas indexes with byte sizes once the PNGs exist.
   const pngs = await Promise.all(canvases.map(toPng));
@@ -83,6 +87,7 @@ export async function deserializeDoc(blob) {
   const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 10, jsonLength)));
 
   const doc = new Doc(meta.width, meta.height, meta.name);
+  doc.guides = Array.isArray(meta.guides) ? meta.guides.filter((g) => (g.axis === "x" || g.axis === "y") && Number.isFinite(g.pos)) : [];
   let offset = 10 + jsonLength;
   const nextImage = async (size) => {
     const png = new Blob([buf.slice(offset, offset + size)], { type: "image/png" });
@@ -101,9 +106,14 @@ export async function deserializeDoc(blob) {
       const img = await nextImage(info.size);
       node = new Layer(img.width, img.height, info.name, info.x ?? 0, info.y ?? 0);
       node.drawLocal(img);
-      Object.assign(node, { text: info.text ?? null, adjustment: info.adjustment ?? null, styles: info.styles ?? null });
+      Object.assign(node, {
+        text: info.text ?? null, shape: info.shape ?? null, adjustment: info.adjustment ?? null, styles: info.styles ?? null,
+      });
     }
-    Object.assign(node, { visible: info.visible, opacity: info.opacity, blend: info.blend });
+    Object.assign(node, {
+      visible: info.visible, opacity: info.opacity, blend: info.blend,
+      clipped: !!info.clipped, locks: info.locks ?? null,
+    });
     if (info.mask) {
       const maskImg = await nextImage(info.mask.size);
       const fill = info.mask.background === 0 ? "#000000" : "#ffffff";

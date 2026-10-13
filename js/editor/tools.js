@@ -1,9 +1,13 @@
 import { createCanvas, cloneCanvas, hexToRgb, rgbToHex, rgba, normRect, unionRect, clamp, h } from "./util.js";
 import { sampleImage, maskFromCanvas, cropImage, healRegion, findSourceOffset, healInto } from "./heal.js";
 import { textFont, renderText, nameFor, textLayerAt, LINE_HEIGHT } from "./text.js";
+import { translateShape } from "./shapes.js";
+import { createShapeTool, createPenTool } from "./shapetools.js";
 import { Selection, floodFill } from "./selection.js";
+import { QuickSelect } from "./quickselect.js";
 import { HANDLE_FRACTIONS, hitHandle, drawHandles, resizeCursor } from "./handles.js";
 import { createTransformTool } from "./transform.js";
+import { snapPoint, snapBox } from "./guides.js";
 
 const icon = (body) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
@@ -14,6 +18,7 @@ export const ICONS = {
   ellipse: icon('<ellipse cx="12" cy="12" rx="8.5" ry="7" stroke-dasharray="3 2.5"/>'),
   lasso: icon('<path d="M7.5 16.5C4.5 15.5 3 13.4 3.4 11 4.2 6.8 9.5 4.6 14.5 5.2s7.2 3.8 5.6 6.6c-1.6 2.9-6.6 4.3-11.3 4.2"/><circle cx="7.5" cy="17.5" r="1.6"/><path d="M7.5 19.1c0 1.4.9 2.4 2.4 2.4"/>'),
   wand: icon('<path d="m4 20 11-11M15 9l2-2M17 3v2M21 7h-2M19.8 4.2l-1.4 1.4M13 4.5l.6 1.4M19.5 11l-1.4-.6"/>'),
+  quickSelect: icon('<path d="M14.5 3.5a2 2 0 0 1 2.8 2.8L9 14.6l-2.8-2.8z"/><path d="M6 12.4c-1.8.3-3 1.8-3 3.6v4h4c1.8 0 3.3-1.2 3.6-3"/><circle cx="17" cy="17" r="4.5" stroke-dasharray="2.2 2"/>'),
   crop: icon('<path d="M6 2v16h16M2 6h16v16"/>'),
   eyedropper: icon('<path d="m14 7 3 3M5 19l-1 1M15.5 5.5a2.1 2.1 0 0 1 3 3L9 18H6v-3z"/>'),
   brush: icon('<path d="M18.4 3.6a2 2 0 0 1 2.9 2.9L12.5 15.3l-2.8-2.8z"/><path d="M8.6 13.6c-2 0-3.6 1.6-3.6 3.6 0 1.4-.9 2.4-2.3 2.8 1 .7 2.5 1 4 1 2.6 0 4.5-2 4.5-4.6"/>'),
@@ -24,6 +29,8 @@ export const ICONS = {
   bucket: icon('<path d="m5 11 7-7 8 8-7 7a2 2 0 0 1-2.8 0L5 13.8a2 2 0 0 1 0-2.8zM5 12h15"/><path d="M20.5 16s1.8 2.1 1.8 3.3a1.8 1.8 0 0 1-3.6 0c0-1.2 1.8-3.3 1.8-3.3z"/>'),
   gradient: icon('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14" stroke-width="4" opacity=".9"/><path d="M12 5v14" stroke-width="4" opacity=".45"/><path d="M17 5v14" stroke-width="4" opacity=".15"/>'),
   text: icon('<path d="M5 7V5h14v2M12 5v14M9 19h6"/>'),
+  shape: icon('<rect x="3" y="3" width="11" height="11" rx="1.5"/><circle cx="15.5" cy="15.5" r="5.5" fill="currentColor" fill-opacity=".35"/>'),
+  pen: icon('<path d="M12 19l7-7 2 2-7 7zM18 13l-1.5-7.5L3 2l3.5 13.5L14 17zM3 2l7.6 7.6"/><circle cx="11" cy="11" r="2"/>'),
   hand: icon('<path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12M11 11.5v-8a1.5 1.5 0 0 1 3 0v8M14 11.5V5a1.5 1.5 0 0 1 3 0v7M17 9.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-2a6 6 0 0 1-5-2.7l-2.7-3.8a1.5 1.5 0 0 1 2.5-1.6L8 14.5"/>'),
   zoom: icon('<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5.5 5.5M8 10.5h5M10.5 8v5"/>'),
 };
@@ -111,14 +118,14 @@ function marqueeTool({ id, name, ellipse }) {
     settings, options: [SELECT_MODE, { type: "hint", text: `${SELECT_HINT} · Shift while dragging constrains` }],
     cursor: "crosshair",
     down(app, e) {
-      start = end = { x: e.x, y: e.y };
+      start = end = snapPoint(app, { x: e.x, y: e.y });
       mode = modeFor(e, settings);
       shiftAtStart = e.shift;
       constrain = false;
     },
     move(app, e) {
       if (!start) return;
-      end = { x: e.x, y: e.y };
+      end = snapPoint(app, { x: e.x, y: e.y });
       constrain = e.shift && !shiftAtStart;
       app.requestRender(false);
     },
@@ -196,6 +203,121 @@ function lassoTool() {
   };
 }
 
+function quickSelectTool() {
+  const settings = { mode: "new", size: 30, allLayers: false, enhance: true };
+  let qs = null, mode = "add", last = null, overlay = null, changed = null;
+
+  // Dabs every quarter brush along the drag, so fast strokes don't skip.
+  function dabTo(app, x, y) {
+    const r = settings.size / 2;
+    const step = Math.max(1, r / 2);
+    const from = last ?? { x, y };
+    const n = Math.max(1, Math.ceil(Math.hypot(x - from.x, y - from.y) / step));
+    for (let i = last ? 1 : 0; i <= n; i++) {
+      const rect = qs.dab(from.x + ((x - from.x) * i) / n, from.y + ((y - from.y) * i) / n, r);
+      if (!rect) continue;
+      changed = unionRect(changed, rect);
+      paintOverlay(app, rect);
+    }
+    last = { x, y };
+    app.requestRender(false);
+  }
+
+  // Tint what the stroke has picked so far.
+  function paintOverlay(app, r) {
+    const img = new ImageData(r.w, r.h);
+    const [cr, cg, cb] = mode === "subtract" ? [235, 70, 70] : [61, 139, 253];
+    for (let y = 0; y < r.h; y++) {
+      for (let x = 0; x < r.w; x++) {
+        if (!qs.mask[(r.y + y) * app.doc.width + r.x + x]) continue;
+        const k = (y * r.w + x) * 4;
+        img.data[k] = cr;
+        img.data[k + 1] = cg;
+        img.data[k + 2] = cb;
+        img.data[k + 3] = 255;
+      }
+    }
+    overlay.getContext("2d").putImageData(img, r.x, r.y);
+  }
+
+  return {
+    id: "quickselect", name: "Quick Selection", key: "W", group: 1, icon: ICONS.quickSelect,
+    settings,
+    options: [
+      { ...SELECT_MODE, options: SELECT_MODE.options.filter(([v]) => v !== "intersect") },
+      { key: "size", label: "Size", type: "range", min: 2, max: 300, unit: "px" },
+      { key: "allLayers", label: "Sample all layers", type: "checkbox" },
+      { key: "enhance", label: "Auto-enhance", type: "checkbox" },
+      { type: "hint", text: "Paint over what you want · Alt subtracts" },
+    ],
+    cursor: "none",
+    down(app, e) {
+      const doc = app.doc;
+      mode = modeFor(e, settings);
+      if (mode === "intersect") mode = "add";
+      if (mode === "new" && doc.selection) mode = "add"; // after the first stroke, strokes add (as in Photoshop)
+      const node = doc.activeLayer;
+      const full = { x: 0, y: 0, w: doc.width, h: doc.height };
+      const data = settings.allLayers || node.isGroup || node.adjustment || doc.quickMask
+        ? doc.compose().getContext("2d").getImageData(0, 0, doc.width, doc.height)
+        : node.getDocImageData(full);
+      qs = new QuickSelect(data);
+      overlay = scratch("quick-select", doc.width, doc.height);
+      last = null;
+      changed = null;
+      dabTo(app, e.x, e.y);
+    },
+    move(app, e) {
+      if (qs) dabTo(app, e.x, e.y);
+    },
+    up(app) {
+      if (!qs) return;
+      const doc = app.doc;
+      const maxHole = (settings.size * settings.size) * 3;
+      let sel = Selection.fromArray(doc.width, doc.height, qs.result(maxHole));
+      qs = null;
+      if (settings.enhance) sel = sel.feathered(1.5);
+      app.combineSelection(sel, mode, "Quick Selection");
+      if (settings.mode === "new") {
+        settings.mode = "add";
+        app.emit("options");
+      }
+    },
+    cancel(app) {
+      qs = null;
+      app.requestRender(false);
+    },
+    drawOverlay(ctx, app) {
+      if (!qs || !overlay) return;
+      ctx.save();
+      ctx.globalAlpha = 0.4;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(overlay, 0, 0);
+      ctx.restore();
+    },
+    drawCursor(ctx, app) {
+      drawBrushCursor(ctx, app, settings.size);
+      // A + or − in the middle says whether the stroke adds or subtracts.
+      const p = app.pointer;
+      const sub = qs ? mode === "subtract" : !!p.alt || settings.mode === "subtract";
+      ctx.save();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(255,255,255,.95)";
+      ctx.shadowColor = "rgba(0,0,0,.8)";
+      ctx.shadowBlur = 2;
+      ctx.beginPath();
+      ctx.moveTo(p.sx - 4, p.sy);
+      ctx.lineTo(p.sx + 4, p.sy);
+      if (!sub) {
+        ctx.moveTo(p.sx, p.sy - 4);
+        ctx.lineTo(p.sx, p.sy + 4);
+      }
+      ctx.stroke();
+      ctx.restore();
+    },
+  };
+}
+
 function wandTool() {
   const settings = { mode: "new", tolerance: 32, contiguous: true, allLayers: false };
   return {
@@ -260,13 +382,16 @@ function cropTool() {
       else if (inside(e)) drag = { type: "move", start: e, orig: { ...rect } };
       else {
         drag = { type: "draw", start: e };
-        rect = { x: Math.round(e.x), y: Math.round(e.y), w: 0, h: 0 };
+        const sp = snapPoint(app, e);
+        drag.start = sp;
+        rect = { x: Math.round(sp.x), y: Math.round(sp.y), w: 0, h: 0 };
       }
     },
     move(app, e) {
       if (!drag) return;
       const { width: w, height: hh } = app.doc;
-      const px = clamp(Math.round(e.x), 0, w), py = clamp(Math.round(e.y), 0, hh);
+      const sp = drag.type === "move" ? e : snapPoint(app, e);
+      const px = clamp(Math.round(sp.x), 0, w), py = clamp(Math.round(sp.y), 0, hh);
       if (drag.type === "draw") {
         const x0 = clamp(Math.round(drag.start.x), 0, w), y0 = clamp(Math.round(drag.start.y), 0, hh);
         rect = normRect(x0, y0, px, py);
@@ -1123,6 +1248,7 @@ function textTool() {
   function restyleActive(app) {
     const layer = app.doc.activeLayer;
     if (!layer.text || (app.busy && !restyle)) return;
+    if (!restyle && app.refuseLocked(layer, "pixels")) return;
     if (!restyle) {
       app.history.begin("Edit Type", [layer], { keepText: true });
       restyle = { layer, timer: 0 };
@@ -1159,6 +1285,7 @@ function textTool() {
         return;
       }
       const hit = textLayerAt(app.doc, e.x, e.y);
+      if (hit && app.refuseLocked(hit, "pixels")) return;
       if (hit) open(app, hit.text.x, hit.text.y, hit);
       else open(app, e.x, e.y);
     },
@@ -1167,6 +1294,7 @@ function textTool() {
     },
     // Start editing a type layer directly (e.g. double-clicking its thumbnail).
     edit(app, layer) {
+      if (app.refuseLocked(layer, "pixels")) return;
       if (editor) commit(app);
       open(app, layer.text.x, layer.text.y, layer);
       editor.focus();
@@ -1193,9 +1321,12 @@ function textTool() {
 
 // ---------- Move & navigation ----------
 
+// Moving a selection's pixels edits them; moving the whole layer repositions it.
+const movingLocks = (app) => (app.doc.selection ? ["pixels"] : ["position"]);
+
 function moveTool() {
   // pieces: [{ surface, owner, isMask, float }] — everything that moves together.
-  let sel = null, pieces = null, start = null, dx = 0, dy = 0;
+  let sel = null, pieces = null, start = null, dx = 0, dy = 0, box = null;
 
   // Cut the selected area (or the whole surface, including anything already
   // off-canvas) of each linked surface out onto a floating canvas.
@@ -1232,10 +1363,12 @@ function moveTool() {
     const { width: w, height: h } = app.doc;
     const shift = new DOMMatrix().translate(dx, dy);
     for (const p of ps) p.surface.stamp(p.float, shift, w, h);
-    // Moving whole type layers keeps them editable.
+    // Moving whole type and shape layers keeps them editable.
     if (!sel) {
       for (const p of ps) {
-        if (!p.isMask && p.owner.text) p.owner.text = { ...p.owner.text, x: p.owner.text.x + dx, y: p.owner.text.y + dy };
+        if (p.isMask) continue;
+        if (p.owner.text) p.owner.text = { ...p.owner.text, x: p.owner.text.x + dx, y: p.owner.text.y + dy };
+        if (p.owner.shape) p.owner.shape = translateShape(p.owner.shape, dx, dy);
       }
       app.history.pending.keepText = true;
     }
@@ -1254,7 +1387,10 @@ function moveTool() {
     options: [{ type: "hint", text: "Drag to move the active layer, group or selection · Shift locks the axis · Arrow keys nudge (Shift ×10)" }],
     cursor: "move",
     down(app, e) {
-      if (!app.ensureVisible(app.doc.activeLayer, { whole: true })) return;
+      if (!app.ensureVisible(app.doc.activeLayer, { whole: true, locks: movingLocks(app) })) return;
+      // What snaps: the selection, or the layer's content (measured before lifting it).
+      const t = app.target(), cur = app.doc.selection;
+      box = cur ? cur.bounds : t.isMask ? t.surface.bounds : app.contentBoundsOf(t.layer);
       lift(app);
       start = e;
       // One preview entry per moving layer (a group moves several).
@@ -1271,9 +1407,15 @@ function moveTool() {
       if (!pieces) return;
       dx = Math.round(e.x - start.x);
       dy = Math.round(e.y - start.y);
-      if (e.shift) {
-        if (Math.abs(dx) > Math.abs(dy)) dy = 0;
-        else dx = 0;
+      let axisLock = null;
+      if (e.shift) axisLock = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+      if (axisLock === "x") dy = 0;
+      if (axisLock === "y") dx = 0;
+      // Snap the moved box's edges or center to guides and the canvas.
+      if (box) {
+        const snap = snapBox(app, { ...box, x: box.x + dx, y: box.y + dy });
+        if (axisLock !== "y") dx += Math.round(snap.dx);
+        if (axisLock !== "x") dy += Math.round(snap.dy);
       }
       if (sel) app.selectionOffset = { x: dx, y: dy };
       app.requestRender();
@@ -1285,7 +1427,7 @@ function moveTool() {
       pieces = null;
     },
     nudge(app, ndx, ndy) {
-      if (app.busy || !app.ensureVisible(app.doc.activeLayer, { whole: true })) return;
+      if (app.busy || !app.ensureVisible(app.doc.activeLayer, { whole: true, locks: movingLocks(app) })) return;
       lift(app);
       dx = ndx;
       dy = ndy;
@@ -1325,6 +1467,7 @@ const DESCRIPTIONS = {
   marquee: "Drag to make a rectangular selection. Hold Shift while dragging for a square. Shift-click adds to the selection, Alt-click subtracts.",
   ellipse: "Drag to make an elliptical selection. Hold Shift while dragging for a circle. Shift-click adds to the selection, Alt-click subtracts.",
   lasso: "Draw a freehand selection. The shape closes itself when you let go.",
+  quickselect: "Paint over the thing you want to select: the selection grows to its edges as you drag. Keep painting to add more; hold Alt to paint away parts you don't want. [ and ] change the brush size.",
   wand: "Click to select areas of similar color. Raise Tolerance to include more shades; turn off Contiguous to select that color everywhere.",
   crop: "Drag to choose the area to keep, fine-tune it with the handles, then press Enter. Cropped pixels aren't deleted, so enlarging the canvas brings them back.",
   eyedropper: "Click to pick a color from the image as the foreground color. Alt-click picks the background color.",
@@ -1336,6 +1479,8 @@ const DESCRIPTIONS = {
   bucket: "Click to fill an area of similar color with the foreground color. Tolerance controls how similar the colors must be.",
   gradient: "Drag to draw a gradient from the foreground to the background color. Hold Shift to snap the angle to 45°.",
   text: "Click to add text, or click existing text to edit it. Text layers stay editable until you paint on or filter them.",
+  shape: "Drag to draw a rectangle, ellipse, polygon, star or line as a vector shape layer. Shift constrains, Alt draws from the center. Shapes stay sharp when transformed.",
+  pen: "Click to place corner points, drag to make curves, and click the first point to close the path. Makes a shape layer or a selection. With a shape layer selected, drag its points to reshape it.",
   hand: "Drag to scroll around the image. Hold Space with any tool to pan temporarily.",
   zoom: "Click to zoom in, Alt-click to zoom out. Ctrl+scroll zooms with any tool.",
 };
@@ -1346,6 +1491,7 @@ export function createTools() {
     marqueeTool({ id: "marquee", name: "Rectangular Marquee" }),
     marqueeTool({ id: "ellipse", name: "Elliptical Marquee", ellipse: true }),
     lassoTool(),
+    quickSelectTool(),
     wandTool(),
     cropTool(),
     eyedropperTool(),
@@ -1357,6 +1503,8 @@ export function createTools() {
     bucketTool(),
     gradientTool(),
     textTool(),
+    createShapeTool(ICONS.shape),
+    createPenTool(ICONS.pen),
     handTool(),
     zoomTool(),
     createTransformTool(),

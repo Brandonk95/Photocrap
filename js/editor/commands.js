@@ -4,7 +4,9 @@ import { filterClient, PreviewQueue } from "./filter-client.js";
 import { serializeDoc, PROJECT_EXTENSION } from "./project.js";
 import { healSelection } from "./heal.js";
 import { DEFAULT_STYLES, STYLE_LABELS, hasStyles } from "./styles.js";
-import { h, isMac, clamp, copyImageData, downloadBlob } from "./util.js";
+import { CHANGELOG, VERSION, showChangelog } from "./changelog.js";
+import { h, isMac, clamp, copyImageData, downloadBlob, createCanvas } from "./util.js";
+import { Selection } from "./selection.js";
 
 // Menu layout. "-" is a separator, "#Text" a section heading.
 export const MENUS = [
@@ -19,16 +21,17 @@ export const MENUS = [
   ["Layer", [
     "layer.new", "layer.duplicate", "layer.delete", "-",
     "#Groups", "layer.newGroup", "layer.group", "layer.ungroup", "-",
+    "#Clipping & Locks", "layer.clip", "layer.lockAll", "-",
     "#New Adjustment Layer", "adj.brightness", "adj.levels", "adj.curves", "adj.hue", "adj.balance", "adj.bw", "adj.invert", "layer.editAdjustment", "-",
     "#Layer Style", "layer.style", "layer.clearStyle", "-",
-    "#Type", "layer.editText", "layer.rasterize", "-",
+    "#Type & Shapes", "layer.editText", "layer.rasterize", "-",
     "#Layer Mask", "mask.add", "mask.hideAll", "mask.toggle", "mask.edit", "mask.view", "mask.apply", "mask.delete", "mask.select", "-",
     "layer.up", "layer.down", "-", "layer.mergeDown", "layer.flatten", "-", "layer.flipH", "layer.flipV",
   ]],
-  ["Select", ["select.all", "select.none", "select.inverse", "-", "#Modify", "select.feather", "select.expand", "select.contract"]],
+  ["Select", ["select.all", "select.none", "select.inverse", "-", "select.refine", "select.quickMask", "-", "#Modify", "select.feather", "select.expand", "select.contract"]],
   ["Filter", ["filter.blur", "filter.sharpen", "filter.noise", "filter.pixelate"]],
-  ["View", ["view.zoomIn", "view.zoomOut", "view.fit", "view.actual"]],
-  ["Help", ["help.shortcuts"]],
+  ["View", ["view.zoomIn", "view.zoomOut", "view.fit", "view.actual", "-", "view.rulers", "view.guides", "view.snap", "view.newGuide", "view.clearGuides", "-", "view.toolbar", "view.options", "view.properties", "view.panels", "-", "view.resetLayout"]],
+  ["Help", ["help.shortcuts", "help.whatsNew"]],
 ];
 
 // Normalize a keydown into the same form commands use, e.g. "Mod+Shift+Z".
@@ -101,6 +104,138 @@ async function adjust(app, label, spec, op, pad = 0) {
   } finally {
     app.setWorking(false);
   }
+}
+
+
+// Select › Refine Edge: improve the selection's edge against the image
+// (hair, fur, soft or jagged edges) with a live preview of the result.
+const REFINE_VIEWS = [["overlay", "Overlay"], ["black", "On Black"], ["white", "On White"], ["mask", "Black & White"]];
+
+async function refineEdgeDialog(app) {
+  const doc = app.doc;
+  if (!doc.selection || app.busy) return;
+  const { width: w, height: h } = doc;
+  const image = doc.compose().getContext("2d").getImageData(0, 0, w, h);
+  const original = doc.selection;
+  const sel = copyImageData(original.data);
+  const matte = createCanvas(w, h); // the refined selection (white, alpha = selected)
+  matte.getContext("2d").drawImage(original.mask, 0, 0);
+  const view = createCanvas(w, h);
+  let viewMode = "overlay";
+
+  // Show the matte the chosen way: tinted, cut out on black/white, or as a mask.
+  const show = () => {
+    const c = view.getContext("2d");
+    c.globalCompositeOperation = "source-over";
+    c.clearRect(0, 0, w, h);
+    if (viewMode === "overlay") {
+      c.fillStyle = "#ff0000";
+      c.fillRect(0, 0, w, h);
+      c.globalCompositeOperation = "destination-out";
+      c.drawImage(matte, 0, 0);
+      app.viewOverlay = { canvas: view, alpha: 0.5 };
+    } else if (viewMode === "mask") {
+      c.fillStyle = "#000";
+      c.fillRect(0, 0, w, h);
+      c.drawImage(matte, 0, 0);
+      app.viewOverlay = { canvas: view };
+    } else {
+      c.drawImage(doc.composite, 0, 0);
+      c.globalCompositeOperation = "destination-in";
+      c.drawImage(matte, 0, 0);
+      c.globalCompositeOperation = "destination-over";
+      c.fillStyle = viewMode === "black" ? "#000" : "#fff";
+      c.fillRect(0, 0, w, h);
+      app.viewOverlay = { canvas: view };
+    }
+    app.requestRender(false);
+  };
+  const setMatte = (img) => {
+    matte.getContext("2d").putImageData(img, 0, 0);
+    show();
+  };
+
+  app.hideSelection = true;
+  show();
+  let lastKey = null;
+  const queue = new PreviewQueue(setMatte);
+  const params = (v) => ({ shift: v.shift, radius: v.radius, smooth: v.smooth, feather: v.feather, contrast: v.contrast });
+  const run = (v) => filterClient.run("refineEdge", { sel: copyImageData(sel), ...params(v) }, copyImageData(image));
+  const values = await openDialog({
+    title: "Refine Edge",
+    preview: true,
+    okLabel: "OK",
+    fields: [
+      select("view", "View", REFINE_VIEWS, viewMode),
+      heading("Edge detection"),
+      range("radius", "Radius", 0, 100, 0, { unit: "px" }),
+      heading("Adjust edge"),
+      range("smooth", "Smooth", 0, 100, 0, { unit: "%" }),
+      range("feather", "Feather", 0, 100, 0, { unit: "px", step: 0.5 }),
+      range("contrast", "Contrast", 0, 100, 0, { unit: "%" }),
+      range("shift", "Shift Edge", -50, 50, 0, { unit: "px" }),
+      heading("Output"),
+      select("output", "Output to", [["selection", "Selection"], ["mask", "Layer Mask"], ["layer", "New Layer with Layer Mask"]], "selection"),
+    ],
+    onChange: (v, on) => {
+      const key = on ? JSON.stringify(params(v)) : "original";
+      if (v.view !== viewMode) {
+        viewMode = v.view;
+        if (key === lastKey) show();
+      }
+      if (key === lastKey) return;
+      lastKey = key;
+      queue.request(() => (on ? run(v) : Promise.resolve(copyImageData(sel))));
+    },
+  });
+  queue.stop();
+  app.viewOverlay = null;
+  app.hideSelection = false;
+  app.requestRender(false);
+  if (!values) return;
+
+  app.setWorking(true);
+  let refined;
+  try {
+    refined = new Selection(imageCanvas(await run(values)));
+  } catch (err) {
+    console.error(err);
+    app.toast("Refine Edge failed.");
+    return;
+  } finally {
+    app.setWorking(false);
+  }
+  if (refined.isEmpty) {
+    app.toast("Nothing would be selected — the selection was left as it was.");
+    return;
+  }
+  app.setSelection(refined, "Refine Edge");
+  if (values.output === "selection") return;
+  if (values.output === "layer") app.duplicateLayer();
+  if (doc.activeLayer.mask) app.deleteMask();
+  app.addMask("selection");
+}
+
+
+async function newGuideDialog(app) {
+  const doc = app.doc;
+  const v = await openDialog({
+    title: "New Guide",
+    okLabel: "Add",
+    fields: [
+      select("axis", "Orientation", [["y", "Horizontal"], ["x", "Vertical"]], "y"),
+      num("pos", "Position", -100000, 100000, Math.round(doc.height / 2)),
+    ],
+    onInput: (key, values, api) => {
+      if (key === "axis") api.set("pos", Math.round((values.axis === "x" ? doc.width : doc.height) / 2));
+    },
+  });
+  if (v) app.addGuide(v.axis, Math.round(v.pos));
+}
+function imageCanvas(img) {
+  const c = createCanvas(img.width, img.height);
+  c.getContext("2d").putImageData(img, 0, 0);
+  return c;
 }
 
 function pickFile(accept = `image/*,${PROJECT_EXTENSION}`) {
@@ -307,6 +442,11 @@ const ADJUSTMENTS = {
 };
 export const ADJUSTMENT_KINDS = Object.keys(ADJUSTMENTS);
 export const adjustmentLabel = (kind) => ADJUSTMENTS[kind]?.label ?? "Adjustment";
+// Fields for editing an adjustment (null if it has no settings), seeded with params.
+export function adjustmentFields(kind, src, params) {
+  const def = ADJUSTMENTS[kind];
+  return def?.fields ? seedFields(def.fields(src), params) : null;
+}
 
 // Start dialog fields from previously chosen values.
 function seedFields(fields, params) {
@@ -403,12 +543,24 @@ async function layerStyleDialog(app) {
     { key: `${effect}.enabled`, label: STYLE_LABELS[effect], type: "checkbox", value: start[effect].enabled, section: true },
     ...props.map((p) => styleField(effect, p, start[effect][p])),
   ]);
+  // Only show the settings of effects that are switched on, so the panel
+  // stays short enough to need no scrolling.
+  const showEffect = (api, effect, on) => {
+    for (const p of STYLE_FIELDS[effect]) api.show(`${effect}.${p}`, on);
+  };
   app.history.begin("Layer Style");
   const values = await openDialog({
     title: `Layer Style — ${layer.name}`,
     width: 420,
     preview: true,
     fields,
+    init: (api) => {
+      for (const effect of Object.keys(STYLE_FIELDS)) showEffect(api, effect, start[effect].enabled);
+    },
+    onInput: (key, v, api) => {
+      const [effect, prop] = key.split(".");
+      if (prop === "enabled") showEffect(api, effect, v[key]);
+    },
     onChange: (v, on) => {
       layer.styles = on ? stylesFromValues(v) : before;
       app.requestRender();
@@ -429,6 +581,7 @@ export function createCommands(app, tools) {
   const hasSel = () => !!app.doc?.selection;
   const active = () => app.doc.activeLayer;
   const siblings = () => app.doc.siblingsOf(active());
+  const allLocked = (node) => !!(node?.locks?.transparency && node.locks.pixels && node.locks.position);
   const layerIndex = () => app.doc.activeIndex;
   const hasMask = () => !!app.doc?.activeLayer?.mask;
 
@@ -518,6 +671,17 @@ export function createCommands(app, tools) {
       },
       dynamicLabel: () => (active()?.isGroup ? "Merge Group" : "Merge Down"),
     },
+    "layer.clip": {
+      label: "Create Clipping Mask", keys: "Mod+Alt+G",
+      enabled: () => active().clipped || app.canClip(active()),
+      run: () => app.toggleClipping(),
+      dynamicLabel: () => (active()?.clipped ? "Release Clipping Mask" : "Create Clipping Mask"),
+    },
+    "layer.lockAll": {
+      label: "Lock All", keys: "Mod+/",
+      run: () => app.toggleLock(active(), "all"),
+      dynamicLabel: () => (allLocked(active()) ? "Unlock All" : "Lock All"),
+    },
     "layer.flatten": { label: "Flatten Image", keys: "Mod+Shift+E", enabled: () => app.doc.allNodes().length > 1, run: () => app.flatten() },
     "layer.style": {
       label: "Layer Style…", enabled: () => !active().isGroup && !active().adjustment, run: () => layerStyleDialog(app),
@@ -535,7 +699,8 @@ export function createCommands(app, tools) {
       run: () => adjustmentLayer(app, kind),
     }])),
     "layer.rasterize": {
-      label: "Rasterize Type", enabled: () => !!app.doc?.activeLayer?.text, run: () => app.rasterizeType(),
+      label: "Rasterize Layer", enabled: () => !!(active()?.text || active()?.shape), run: () => app.rasterizeLayer(),
+      dynamicLabel: () => (active()?.shape ? "Rasterize Shape" : "Rasterize Type"),
     },
     "layer.editText": {
       label: "Edit Text", enabled: () => !!app.doc?.activeLayer?.text, run: () => app.editText(app.doc.activeLayer),
@@ -567,6 +732,13 @@ export function createCommands(app, tools) {
     "select.all": { label: "Select All", keys: "Mod+A", run: () => app.selectAll() },
     "select.none": { label: "Deselect", keys: "Mod+D", enabled: hasSel, run: () => app.deselect() },
     "select.inverse": { label: "Inverse", keys: "Shift+F7", enabled: hasSel, run: () => app.invertSelection() },
+    "select.refine": {
+      label: "Refine Edge…", keys: "Mod+Alt+R", enabled: hasSel, run: () => refineEdgeDialog(app),
+    },
+    "select.quickMask": {
+      label: "Edit in Quick Mask Mode", keys: "Q", run: () => app.toggleQuickMask(),
+      dynamicLabel: () => (app.doc?.quickMask ? "Exit Quick Mask Mode" : "Edit in Quick Mask Mode"),
+    },
     "select.feather": {
       label: "Feather…", keys: "Shift+F6", enabled: hasSel,
       run: () => modifySelection(app, "Feather Selection", "Feather radius", 8, (sel, v) => sel.feathered(v)),
@@ -609,8 +781,29 @@ export function createCommands(app, tools) {
     "view.zoomOut": { label: "Zoom Out", keys: "Mod+-", run: () => app.zoomStep(-1) },
     "view.fit": { label: "Fit on Screen", keys: "Mod+0", run: () => app.fit() },
     "view.actual": { label: "Actual Pixels", keys: "Mod+1", run: () => app.actualSize() },
+    "view.rulers": {
+      label: "Show Rulers", keys: "Mod+R", run: () => app.setPref("rulers", !app.prefs.rulers),
+      dynamicLabel: () => (app.prefs.rulers ? "Hide Rulers" : "Show Rulers"),
+    },
+    "view.guides": {
+      label: "Show Guides", keys: "Mod+;", run: () => app.setPref("guides", !app.prefs.guides),
+      dynamicLabel: () => (app.prefs.guides ? "Hide Guides" : "Show Guides"),
+    },
+    "view.snap": {
+      label: "Snap", run: () => app.setPref("snap", !app.prefs.snap),
+      dynamicLabel: () => (app.prefs.snap ? "Turn Snapping Off" : "Turn Snapping On"),
+    },
+    "view.newGuide": { label: "New Guide…", run: () => newGuideDialog(app) },
+    "view.clearGuides": { label: "Clear Guides", enabled: () => !!app.doc?.guides.length, run: () => app.clearGuides() },
+    "view.properties": { label: "Show/Hide Properties", run: () => app.emit("toggle-properties") },
+    "view.resetLayout": { label: "Reset Layout to Default", run: () => app.resetLayout() },
+    // Tab and Shift+Tab are handled by the panels themselves, only when nothing has focus.
+    "view.toolbar": { label: "Show/Hide Toolbar", keys: "Shift+Tab", noBind: true, run: () => app.emit("toggle-toolbar") },
+    "view.options": { label: "Show/Hide Options Bar", run: () => app.emit("toggle-options") },
+    "view.panels": { label: "Show/Hide Panels", keys: "Tab", noBind: true, run: () => app.emit("toggle-panels") },
 
     "help.shortcuts": { label: "Keyboard Shortcuts", keys: "?", run: () => shortcutsDialog(commands, tools) },
+    "help.whatsNew": { label: `What's New (v${VERSION})`, run: () => showChangelog(CHANGELOG, "Photocrap release notes") },
   };
   return commands;
 }

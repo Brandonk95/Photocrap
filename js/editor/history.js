@@ -52,13 +52,15 @@ export class History {
       shape: node.shape ?? null,
       adjustment: node.adjustment ?? null,
       styles: node.styles ?? null,
+      clipped: !!node.clipped,
+      locks: node.locks ?? null,
       children: node.isGroup ? this.snapshotNodes(node.layers) : null,
     }));
   }
 
   restoreNodes(list) {
-    return list.map(({ node, name, opacity, blend, x, y, mask, maskEnabled, mx, my, text, shape, adjustment, styles, children }) => {
-      Object.assign(node, { name, opacity, blend, mask, text, shape, adjustment, styles });
+    return list.map(({ node, name, opacity, blend, x, y, mask, maskEnabled, mx, my, text, shape, adjustment, styles, clipped, locks, children }) => {
+      Object.assign(node, { name, opacity, blend, mask, text, shape, adjustment, styles, clipped, locks });
       if (children) node.layers = this.restoreNodes(children);
       else {
         Object.assign(node, { x, y });
@@ -82,6 +84,8 @@ export class History {
       layers: this.snapshotNodes(doc.layers),
       active: doc.activeLayer,
       selection: doc.selection,
+      quickMask: doc.quickMask,
+      guides: doc.guides,
     };
   }
 
@@ -93,6 +97,8 @@ export class History {
     doc.layers = this.restoreNodes(s.layers);
     doc.activeLayer = s.active;
     doc.selection = s.selection;
+    doc.quickMask = s.quickMask ?? null;
+    doc.guides = s.guides ?? [];
     doc.syncSize();
     if (resized) this.app.fit();
   }
@@ -153,11 +159,14 @@ export class History {
         const d = rect ?? s.bounds;
         const r = clampRect({ x: d.x - s.x, y: d.y - s.y, w: d.w, h: d.h }, copy.width, copy.height);
         if (!r.w || !r.h) continue;
-        records.push({
-          surface: s, x: r.x, y: r.y, full: false,
-          before: copy.getContext("2d").getImageData(r.x, r.y, r.w, r.h),
-          after: s.ctx.getImageData(r.x, r.y, r.w, r.h),
-        });
+        const before = copy.getContext("2d").getImageData(r.x, r.y, r.w, r.h);
+        let after = s.ctx.getImageData(r.x, r.y, r.w, r.h);
+        // Locked transparency: the edit may recolor pixels but not change their coverage.
+        if (!p.keepText && this.app.lockOf(s, "transparency")) {
+          after = keepAlpha(before, after);
+          s.ctx.putImageData(after, r.x, r.y);
+        }
+        records.push({ surface: s, x: r.x, y: r.y, full: false, before, after });
         s.refresh({ x: r.x + s.x, y: r.y + s.y, w: r.w, h: r.h });
       }
     }
@@ -240,4 +249,19 @@ export class History {
     this.app.emit("history");
     this.app.contentChanged();
   }
+}
+
+// `after` with the alpha channel of `before`. Pixels the edit erased keep
+// their old color.
+function keepAlpha(before, after) {
+  const b = before.data, a = after.data;
+  for (let i = 0; i < a.length; i += 4) {
+    if (!a[i + 3]) {
+      a[i] = b[i];
+      a[i + 1] = b[i + 1];
+      a[i + 2] = b[i + 2];
+    }
+    a[i + 3] = b[i + 3];
+  }
+  return after;
 }

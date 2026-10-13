@@ -1,6 +1,8 @@
 import { createCanvas } from "./util.js";
 import { renderText } from "./text.js";
+import { transformShape, renderShape } from "./shapes.js";
 import { HANDLE_FRACTIONS, hitHandle, drawBox, drawHandles, resizeCursor, ROTATE_CURSOR } from "./handles.js";
+import { snapBox } from "./guides.js";
 
 // Free Transform: lifts the selected pixels (or the layer's content) onto a
 // floating canvas, lets you scale/rotate/move it with on-canvas handles, and
@@ -71,14 +73,27 @@ export function createTransformTool() {
     if (sel) app.doc.selection = sel.transformed(m);
     // Moving or uniformly scaling a whole type layer keeps it editable:
     // update its text and re-render it crisply instead of keeping scaled pixels.
-    if (!sel && s.angle === 0 && s.sx > 0 && Math.abs(s.sx - s.sy) < 0.0005) {
+    // Transforming whole layers: shapes stay vector under any transform (their
+    // points are transformed and re-rendered crisply); type stays editable
+    // when it's only moved or uniformly scaled, and becomes pixels otherwise.
+    if (!sel) {
+      const uniform = s.angle === 0 && s.sx > 0 && Math.abs(s.sx - s.sy) < 0.0005;
       for (const piece of s.pieces) {
         const owner = piece.owner;
-        if (piece.isMask || !owner.text) continue;
-        const t = owner.text;
-        const p = m.transformPoint({ x: t.x, y: t.y });
-        owner.text = { ...t, x: p.x, y: p.y, size: Math.max(1, t.size * s.sx) };
-        renderText(owner, app.doc);
+        if (piece.isMask) continue;
+        if (owner.shape) {
+          owner.shape = transformShape(owner.shape, m);
+          renderShape(owner, app.doc);
+        }
+        if (owner.text && uniform) {
+          const t = owner.text;
+          const p = m.transformPoint({ x: t.x, y: t.y });
+          owner.text = { ...t, x: p.x, y: p.y, size: Math.max(1, t.size * s.sx) };
+          renderText(owner, app.doc);
+        } else if (owner.text) {
+          owner.text = null;
+          app.toast(`“${owner.name}” is now pixels — rotated or stretched text can't stay editable.`);
+        }
       }
       app.history.pending.keepText = true;
     }
@@ -108,8 +123,9 @@ export function createTransformTool() {
 
     // Lift the content of the edit target (plus its linked mask). Returns
     // false if there is nothing to transform.
-    start(app, prevTool) {
-      const doc = app.doc, sel = doc.selection;
+    // whole: transform the whole layer even if there is a selection.
+    start(app, prevTool, { whole = false } = {}) {
+      const doc = app.doc, sel = whole ? null : doc.selection;
       const { layer, surface: target, isMask } = app.target();
       // Bounds include any content that is already off-canvas.
       const b = sel ? sel.bounds : isMask ? target.bounds : app.contentBoundsOf(layer);
@@ -141,6 +157,17 @@ export function createTransformTool() {
       syncSettings(app);
       app.requestRender();
       return true;
+    },
+
+    // Give the layer's content new bounds directly (the Properties panel's
+    // X / Y / W / H), with the same rules as a dragged transform.
+    setBounds(app, { x, y, w, h }) {
+      if (!this.start(app, app.tool, { whole: true })) return;
+      s.sx = w / s.b.w;
+      s.sy = h / s.b.h;
+      s.cx = x + w / 2;
+      s.cy = y + h / 2;
+      commit(app);
     },
 
     cursor(app, p) {
@@ -179,6 +206,13 @@ export function createTransformTool() {
         }
         s.cx = d.cx + dx;
         s.cy = d.cy + dy;
+        // Snap the (unrotated) box to guides and the canvas.
+        if (s.angle === 0) {
+          const w = Math.abs(s.sx) * s.b.w, h = Math.abs(s.sy) * s.b.h;
+          const snap = snapBox(app, { x: s.cx - w / 2, y: s.cy - h / 2, w, h });
+          s.cx += snap.dx;
+          s.cy += snap.dy;
+        }
       } else if (d.type === "rotate") {
         const a0 = Math.atan2(d.start.y - d.cy, d.start.x - d.cx);
         const a1 = Math.atan2(e.y - d.cy, e.x - d.cx);

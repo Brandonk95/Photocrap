@@ -1,6 +1,9 @@
 import { Doc, Layer, LayerMask, Group } from "./doc.js";
 import { hasStyles } from "./styles.js";
+import { transformShape, translateShape, renderShape } from "./shapes.js";
 import { History } from "./history.js";
+import { RULER, DEFAULT_VIEW_PREFS, loadViewPrefs, saveViewPrefs, guideAt, rulerAt, guidePos, drawGuides, drawRulers } from "./guides.js";
+import { resetDialogLayout } from "./dialogs.js";
 import { Selection } from "./selection.js";
 import { applyMask } from "./filters.js";
 import { isProjectFile, deserializeDoc } from "./project.js";
@@ -37,6 +40,13 @@ export class App {
     this.frameRequested = false;
     this.ants = 0;
     this.workspaceColor = getComputedStyle(document.documentElement).getPropertyValue("--workspace").trim() || "#0b0d11";
+    const css = getComputedStyle(document.documentElement), token = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+    this.rulerColors = {
+      bg: token("--bg-2", "#14161b"), doc: token("--panel", "#1a1d23"), tick: "rgba(255,255,255,.28)",
+      text: token("--muted", "#8b93a1"), border: token("--border", "#2a2e36"), accent: token("--accent", "#3d8bfd"),
+    };
+    this.prefs = loadViewPrefs(); // rulers, guides, snap
+    this.snapLines = {};          // what the current drag snapped to, for display
     this.checker = this.makeChecker();
 
     this.resize();
@@ -255,6 +265,17 @@ export class App {
     ctx.imageSmoothingEnabled = zoom < 2;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(doc.composite, x, y, dw, dh);
+    if (doc.quickMask && doc.quickOverlay) {
+      ctx.globalAlpha = 0.5;
+      ctx.drawImage(doc.quickOverlay, x, y, dw, dh);
+      ctx.globalAlpha = 1;
+    }
+    // A dialog's view of the image (e.g. Refine Edge's "On Black").
+    if (this.viewOverlay) {
+      ctx.globalAlpha = this.viewOverlay.alpha ?? 1;
+      ctx.drawImage(this.viewOverlay.canvas, x, y, dw, dh);
+      ctx.globalAlpha = 1;
+    }
 
     // Overlays, drawn in document coordinates.
     ctx.save();
@@ -264,8 +285,59 @@ export class App {
     this.tool?.drawOverlay?.(ctx, this);
     ctx.restore();
 
+    drawGuides(this, ctx);
     this.tool?.drawScreenOverlay?.(ctx, this);
-    if (this.pointer && !this.spaceDown && this.gesture?.type !== "pan") this.tool?.drawCursor?.(ctx, this);
+    if (this.prefs.rulers) drawRulers(this, ctx, this.rulerColors);
+    const overRuler = this.pointer && rulerAt(this, this.pointer.sx, this.pointer.sy);
+    if (this.pointer && !overRuler && !this.spaceDown && !["pan", "guide"].includes(this.gesture?.type)) this.tool?.drawCursor?.(ctx, this);
+  }
+
+  // ---------- Rulers, guides & snapping ----------
+
+  setPref(key, value) {
+    this.prefs[key] = value;
+    saveViewPrefs(this.prefs);
+    this.emit("prefs");
+    this.requestRender(false);
+  }
+
+  // View › Reset Layout: panels, toolbar, options bar, dialog positions and
+  // view settings go back to their defaults. The image is not touched.
+  resetLayout() {
+    this.prefs = { ...DEFAULT_VIEW_PREFS };
+    saveViewPrefs(this.prefs);
+    resetDialogLayout();
+    this.emit("reset-layout");
+    this.emit("prefs");
+    this.requestRender(false);
+    this.toast("Layout reset to the default.");
+  }
+
+  setGuides(guides, label) {
+    if (this.busy && this.gesture?.type !== "guide") return;
+    this.history.begin(label);
+    this.doc.guides = guides;
+    this.history.commit();
+  }
+
+  addGuide(axis, pos) {
+    this.setGuides([...this.doc.guides, { axis, pos }], "New Guide");
+  }
+
+  clearGuides() {
+    if (this.doc.guides.length) this.setGuides([], "Clear Guides");
+  }
+
+  endGuideDrag(g) {
+    const guides = this.doc.guides;
+    if (g.index < 0) {
+      if (g.pos != null && !g.remove) this.setGuides([...guides, { axis: g.axis, pos: g.pos }], "New Guide");
+    } else if (g.remove) {
+      this.setGuides(guides.filter((_, i) => i !== g.index), "Delete Guide");
+    } else if (g.pos != null && g.pos !== guides[g.index].pos) {
+      this.setGuides(guides.map((x, i) => (i === g.index ? { axis: x.axis, pos: g.pos } : x)), "Move Guide");
+    }
+    this.requestRender(false);
   }
 
   drawAnts(path) {
@@ -373,6 +445,17 @@ export class App {
         return;
       }
       if (ev.button !== 0 || this.working || (this.history.pending && !this.tool.modal)) return;
+      this.snapLines = {};
+      // Drag out of a ruler to make a guide; drag a guide (Move tool, or
+      // Ctrl with any tool) to move it, or back onto a ruler to remove it.
+      const fromRuler = !this.history.pending && rulerAt(this, e.sx, e.sy);
+      const guide = fromRuler || this.history.pending || !(this.tool.id === "move" || e.mod) ? -1 : guideAt(this, e.sx, e.sy);
+      if (fromRuler || guide >= 0) {
+        capture(ev.pointerId);
+        this.gesture = { type: "guide", pointerId: ev.pointerId, axis: fromRuler || this.doc.guides[guide].axis, index: guide, pos: null };
+        this.updateCursor();
+        return;
+      }
       capture(ev.pointerId);
       this.gesture = { type: "tool", pointerId: ev.pointerId };
       this.tool.down?.(this, e);
@@ -396,6 +479,13 @@ export class App {
         g.last = e;
         return;
       }
+      if (g?.type === "guide") {
+        g.pos = guidePos(this, g.axis, e);
+        // Back over its ruler (or the corner) removes it.
+        g.remove = g.axis === "x" ? e.sx < RULER : e.sy < RULER;
+        this.requestRender(false);
+        return;
+      }
       if (g?.type === "tool") {
         if (ev.pointerId !== g.pointerId) return;
         const events = ev.getCoalescedEvents?.() ?? [];
@@ -414,8 +504,10 @@ export class App {
         if (this.touches.size < 2) this.gesture = null;
         return;
       }
-      if (g.type === "tool" && ev.pointerId !== g.pointerId) return;
+      if ((g.type === "tool" || g.type === "guide") && ev.pointerId !== g.pointerId) return;
+      if (g.type === "guide") this.endGuideDrag(g);
       this.gesture = null;
+      this.snapLines = {};
       if (g.type === "tool") this.tool.up?.(this, this.pointerEvent(ev));
       this.updateCursor();
       this.emit("gestureend");
@@ -477,8 +569,13 @@ export class App {
     const t = this.tool;
     if (!t) return;
     let cursor;
-    if (this.gesture?.type === "pan") cursor = "grabbing";
+    const p = this.pointer, g = this.gesture;
+    const guide = !g && p && (t.id === "move" || p.mod) ? guideAt(this, p.sx, p.sy) : -1;
+    if (g?.type === "pan") cursor = "grabbing";
+    else if (g?.type === "guide") cursor = g.axis === "x" ? "col-resize" : "row-resize";
     else if (this.spaceDown || t.id === "hand") cursor = "grab";
+    else if (!g && p && rulerAt(this, p.sx, p.sy)) cursor = "default";
+    else if (guide >= 0) cursor = this.doc.guides[guide].axis === "x" ? "col-resize" : "row-resize";
     else cursor = typeof t.cursor === "function" ? t.cursor(this, this.pointer) : t.cursor;
     this.canvas.style.cursor = cursor ?? "default";
   }
@@ -501,7 +598,7 @@ export class App {
   }
 
   beginTransform() {
-    if (this.busy || !this.ensureVisible(this.doc.activeLayer, { whole: true })) return;
+    if (this.busy || !this.ensureVisible(this.doc.activeLayer, { whole: true, locks: ["pixels", "position"] })) return;
     const prev = this.tool;
     prev.deactivate?.(this); // e.g. commit pending text before the transform opens its history entry
     if (this.tools.get("transform").start(this, prev)) this.setTool("transform");
@@ -533,6 +630,35 @@ export class App {
     this.history.commit();
   }
 
+  // ---------- Quick Mask ----------
+
+  // Quick Mask mode turns the selection into a grayscale mask you edit with
+  // any painting tool (white selects, black deselects); unselected areas are
+  // tinted red. Leaving it turns the mask back into a selection.
+  toggleQuickMask() {
+    if (this.busy) return;
+    const doc = this.doc;
+    if (doc.quickMask) {
+      const m = doc.quickMask.mask;
+      const sel = new Selection(m.alphaFor({ x: 0, y: 0, w: doc.width, h: doc.height }));
+      this.history.begin("Exit Quick Mask");
+      doc.quickMask = null;
+      doc.selection = sel.isEmpty ? null : sel;
+    } else {
+      // No selection: everything is selected (nothing tinted), like Photoshop.
+      const mask = new LayerMask(doc.width, doc.height, doc.selection ? "#000000" : "#ffffff");
+      if (doc.selection) {
+        mask.ctx.drawImage(doc.selection.mask, 0, 0); // white where selected
+        mask.refresh();
+      }
+      this.history.begin("Quick Mask");
+      doc.quickMask = { id: "quick-mask", name: "Quick Mask", mask, visible: true, opacity: 1, isGroup: false };
+      doc.selection = null;
+    }
+    this.history.commit();
+    this.emit("options");
+  }
+
   combineSelection(sel, mode, label) {
     const cur = this.doc.selection;
     let next = sel;
@@ -561,6 +687,9 @@ export class App {
   // mask to paint on; groups have no pixels (surface is null unless their
   // mask is targeted).
   target() {
+    // In Quick Mask mode every pixel tool edits the quick mask.
+    const quick = this.doc.quickMask;
+    if (quick) return { layer: quick, surface: quick.mask, isMask: true, quick: true };
     const layer = this.doc.activeLayer;
     const mask = layer.mask && (layer.editMask || layer.adjustment) ? layer.mask : null;
     const pixelless = layer.isGroup || !!layer.adjustment;
@@ -641,7 +770,10 @@ export class App {
 
   // Can the active layer be edited? whole: the operation acts on the whole
   // node (move/transform), so groups and adjustment layers are fine.
-  ensureVisible(layer, { whole = false } = {}) {
+  // Can the active layer be edited this way? Toasts the reason if not.
+  // `locks` lists the kinds of change ("pixels", "position") the edit makes;
+  // by default pixel edits, or nothing for whole-layer operations.
+  ensureVisible(layer, { whole = false, locks = whole ? [] : ["pixels"] } = {}) {
     if (!this.doc.isVisible(layer)) {
       this.toast("The active layer is hidden.");
       return false;
@@ -652,7 +784,68 @@ export class App {
         : "Adjustment layers have no pixels. Add a mask to paint where the adjustment applies.");
       return false;
     }
+    const onMask = this.target().isMask; // masks stay editable when pixels are locked
+    for (const kind of locks) {
+      if (kind === "pixels" && onMask) continue;
+      if (this.refuseLocked(layer, kind)) return false;
+    }
     return true;
+  }
+
+  // True (with a toast saying why) if `kind` is locked for node.
+  refuseLocked(node, kind) {
+    const locked = this.lockedIn(node, kind);
+    if (locked) this.toast(`“${locked.name}” is locked — ${kind === "pixels" ? "its pixels can't be edited" : "it can't be moved"}. Unlock it in the Layers panel.`);
+    return !!locked;
+  }
+
+  // ---------- Locks ----------
+
+  // The node (or the group containing it) that locks `kind` for it, or null.
+  lockOf(node, kind) {
+    for (let n = node; n; n = this.doc.parentOf(n)) if (n.locks?.[kind]) return n;
+    return null;
+  }
+
+  // Like lockOf, but for a group also anything inside it.
+  lockedIn(node, kind) {
+    return this.lockOf(node, kind)
+      ?? (node.isGroup ? this.doc.allNodes(node.layers).find((n) => n.locks?.[kind]) ?? null : null);
+  }
+
+  // kind: "transparency" | "pixels" | "position" | "all".
+  toggleLock(node, kind) {
+    if (this.busy) return;
+    const locks = { transparency: false, pixels: false, position: false, ...node.locks };
+    const all = locks.transparency && locks.pixels && locks.position;
+    if (kind === "all") locks.transparency = locks.pixels = locks.position = !all;
+    else locks[kind] = !locks[kind];
+    const any = locks.transparency || locks.pixels || locks.position;
+    this.setLayerProps(node, { locks: any ? locks : null }, any ? "Lock Layer" : "Unlock Layer");
+  }
+
+  // ---------- Clipping masks ----------
+
+  // Can `node` be clipped to the layer below it? (Not the bottom one.)
+  canClip(node) {
+    return this.doc.siblingsOf(node).indexOf(node) > 0;
+  }
+
+  // The layer a clipped node is clipped to, or null.
+  clipBase(node) {
+    if (!node.clipped) return null;
+    const list = this.doc.siblingsOf(node);
+    for (let i = list.indexOf(node) - 1; i >= 0; i--) if (!list[i].clipped || i === 0) return list[i];
+    return null;
+  }
+
+  toggleClipping(node = this.doc.activeLayer) {
+    if (this.busy) return;
+    if (!node.clipped && !this.canClip(node)) {
+      this.toast("There's no layer below to clip to.");
+      return;
+    }
+    this.setLayerProps(node, { clipped: !node.clipped }, node.clipped ? "Release Clipping Mask" : "Create Clipping Mask");
   }
 
   fill(color, label) {
@@ -697,7 +890,7 @@ export class App {
   copy(cut = false) {
     const doc = this.doc, sel = doc.selection;
     const { layer, surface } = this.target();
-    if (!this.ensureVisible(layer)) return;
+    if (!this.ensureVisible(layer, { locks: cut ? ["pixels"] : [] })) return;
     const r = sel ? sel.bounds : { x: 0, y: 0, w: doc.width, h: doc.height };
     const canvas = createCanvas(r.w, r.h);
     const c = canvas.getContext("2d");
@@ -753,7 +946,7 @@ export class App {
 
   flipLayer(axis) {
     const layer = this.doc.activeLayer;
-    if (!this.ensureVisible(layer, { whole: true })) return;
+    if (!this.ensureVisible(layer, { whole: true, locks: ["pixels", "position"] })) return;
     const surfaces = this.linkedSurfaces().map((p) => p.surface);
     this.history.begin(axis === "h" ? "Flip Layer Horizontal" : "Flip Layer Vertical", surfaces);
     this.transformSurfaces(surfaces, this.doc.selection, axis === "h" ? -1 : 1, axis === "v" ? -1 : 1, 0, this.contentBoundsOf(layer));
@@ -826,7 +1019,8 @@ export class App {
         ctx.drawImage(src, 0, 0, next.w, next.h);
       },
       // Uniform scaling keeps type editable; stretching it can't be represented.
-      (t) => (Math.abs(kx - ky) < 0.001 ? { ...t, x: t.x * kx, y: t.y * ky, size: t.size * kx } : null));
+      (t) => (Math.abs(kx - ky) < 0.001 ? { ...t, x: t.x * kx, y: t.y * ky, size: t.size * kx } : null),
+      new DOMMatrix().scale(kx, ky));
   }
 
   // ax/ay: anchor (0, 0.5 or 1). Layers just shift (nothing is cut off) and
@@ -846,6 +1040,7 @@ export class App {
     }
     for (const layer of doc.leaves()) {
       if (layer.text) layer.text = { ...layer.text, x: layer.text.x + dx, y: layer.text.y + dy };
+      if (layer.shape) layer.shape = translateShape(layer.shape, dx, dy);
     }
     if (fill && bottom) {
       const c = bottom.ctx;
@@ -880,6 +1075,7 @@ export class App {
     }
     for (const layer of doc.leaves()) {
       if (layer.text) layer.text = { ...layer.text, x: layer.text.x - r.x, y: layer.text.y - r.y };
+      if (layer.shape) layer.shape = translateShape(layer.shape, -r.x, -r.y);
     }
     doc.width = r.w;
     doc.height = r.h;
@@ -905,7 +1101,12 @@ export class App {
         else if (turn === 270) ctx.setTransform(0, -1, 1, 0, 0, old.w);
         else ctx.setTransform(-1, 0, 0, -1, old.w, old.h);
         ctx.drawImage(src, 0, 0);
-      });
+      },
+      undefined,
+      // The same rotation in document coordinates, for shapes.
+      turn === 90 ? new DOMMatrix([0, 1, -1, 0, H, 0])
+        : turn === 270 ? new DOMMatrix([0, -1, 1, 0, 0, W])
+          : new DOMMatrix([-1, 0, 0, -1, W, H]));
   }
 
   flipImage(axis) {
@@ -916,7 +1117,9 @@ export class App {
         if (axis === "h") ctx.setTransform(-1, 0, 0, 1, old.w, 0);
         else ctx.setTransform(1, 0, 0, -1, 0, old.h);
         ctx.drawImage(src, 0, 0);
-      });
+      },
+      undefined,
+      axis === "h" ? new DOMMatrix([-1, 0, 0, 1, W, 0]) : new DOMMatrix([1, 0, 0, -1, 0, H]));
   }
 
   // ---------- Layers ----------
@@ -943,9 +1146,12 @@ export class App {
       copy = new Layer(w, h, name, x, y);
       copy.drawLocal(node.canvas);
       // text/adjustment/styles objects are immutable, so sharing is safe
-      Object.assign(copy, { text: node.text, adjustment: node.adjustment, styles: node.styles });
+      Object.assign(copy, { text: node.text, shape: node.shape, adjustment: node.adjustment, styles: node.styles });
     }
-    Object.assign(copy, { opacity: node.opacity, blend: node.blend, visible: node.visible, editMask: node.editMask });
+    Object.assign(copy, {
+      opacity: node.opacity, blend: node.blend, visible: node.visible, editMask: node.editMask,
+      clipped: node.clipped, locks: node.locks ? { ...node.locks } : null,
+    });
     copy.mask = node.mask?.clone() ?? null;
     return copy;
   }
@@ -1015,8 +1221,10 @@ export class App {
     const list = doc.siblingsOf(top), i = list.indexOf(top);
     const below = list[i - 1];
     if (!below || below.isGroup || below.adjustment) return;
+    if (this.refuseLocked(below, "pixels")) return;
     this.history.begin("Merge Down", [below]);
-    if (top.adjustment || hasStyles(top.styles) || hasStyles(below.styles)) {
+    // A layer clipped to the one below also needs the compositor to clip it.
+    if (top.adjustment || hasStyles(top.styles) || hasStyles(below.styles) || (top.clipped && !below.clipped)) {
       // Effects and adjustments need the full compositor; the result keeps
       // the lower layer's opacity and blend mode, like Photoshop.
       const saved = { opacity: below.opacity, blend: below.blend };

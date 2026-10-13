@@ -2,16 +2,48 @@ import { h, clamp } from "./util.js";
 import { curveLUT, histogram } from "./filters.js";
 import { openColorPicker, isColorPickerOpen } from "./colorpicker.js";
 
-// Modal dialog built from a field list. Resolves with the values, or null if cancelled.
+// Where the user last put a floating dialog (shared by all of them), and the
+// size they gave each kind of dialog. Without a saved size a dialog fits its
+// content. Remembered across visits.
+const FRAME_KEY = "photocrap:dialog-frames";
+let floatingSpot = null; // { left, top }
+let floatingSizes = {};  // { [dialog kind]: { width, height? } }
+try {
+  const saved = JSON.parse(localStorage.getItem(FRAME_KEY));
+  floatingSpot = saved?.spot ?? null;
+  floatingSizes = saved?.sizes ?? {};
+} catch { /* nothing saved, or storage unavailable */ }
+
+function saveFrame() {
+  try { localStorage.setItem(FRAME_KEY, JSON.stringify({ spot: floatingSpot, sizes: floatingSizes })); } catch { /* ignore */ }
+}
+
+// Forget where floating dialogs were put and how big they were made.
+export function resetDialogLayout() {
+  floatingSpot = null;
+  floatingSizes = {};
+  try { localStorage.removeItem(FRAME_KEY); } catch { /* ignore */ }
+}
+
+const MIN_W = 260, MIN_H = 200;
+const FLOATING_WIDTH = 320; // compact default; fields sit on one row each
+
+// Dialog built from a field list. Resolves with the values, or null if cancelled.
 //   onInput(key, values, api)  — a field changed; api.set/api.show update other fields
 //   onChange(values, preview)  — throttled to one call per frame, for live previews
+//   escapeOk                   — Esc means OK rather than Cancel (when Cancel is the risky choice)
+//
+// Dialogs with a live preview "float": no dimmed backdrop, docked to the
+// side and draggable, so the image stays fully visible (and can be panned
+// and zoomed) while you judge the result.
 export function openDialog({
   title, fields = [], okLabel = "OK", cancelLabel = "Cancel", width = 360,
-  preview = false, onChange, onInput, init,
+  preview = false, onChange, onInput, init, escapeOk = false,
 }) {
   return new Promise((resolve) => {
     const values = {}, rows = {}, setters = {};
-    let previewOn = true, frame = 0;
+    const floating = preview && !!onChange;
+    let previewOn = true, comparing = false, frame = 0, sizeWatcher = null;
 
     const api = {
       set(key, v) { values[key] = v; setters[key]?.(v); },
@@ -21,7 +53,7 @@ export function openDialog({
       if (key) onInput?.(key, values, api);
       if (!onChange) return;
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => onChange({ ...values }, previewOn));
+      frame = requestAnimationFrame(() => onChange({ ...values }, previewOn && !comparing));
     };
 
     const body = h("div", { class: "modal-body" });
@@ -31,26 +63,129 @@ export function openDialog({
       body.append(row);
     }
 
+    // Press and hold to see the original, release to see the adjustment again.
+    const compare = floating
+      ? h("button", { class: "btn-s compare", type: "button", title: "Hold to see the original image" }, "Hold to compare")
+      : null;
+    if (compare) {
+      const set = (on) => {
+        if (comparing === on) return;
+        comparing = on;
+        compare.classList.toggle("on", on);
+        notify(null);
+      };
+      compare.addEventListener("pointerdown", (e) => {
+        compare.setPointerCapture(e.pointerId);
+        set(true);
+      });
+      for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) compare.addEventListener(type, () => set(false));
+    }
+
     const ok = h("button", { class: "btn-s primary", type: "button", onclick: () => close({ ...values }) }, okLabel);
     const foot = h("div", { class: "modal-foot" },
-      preview && onChange
+      floating
         ? h("label", { class: "field-check" },
           h("input", { type: "checkbox", checked: true, onchange: (e) => { previewOn = e.target.checked; notify(null); } }),
           "Preview")
         : null,
+      compare,
       h("span", { class: "spacer" }),
       cancelLabel ? h("button", { class: "btn-s", type: "button", onclick: () => close(null) }, cancelLabel) : null,
       ok);
 
-    const modal = h("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-label": title, style: `--w:${width}px` },
-      h("div", { class: "modal-head" }, title), body, foot);
-    const backdrop = h("div", { class: "modal-backdrop" }, modal);
+    // X: same as Cancel (or as Esc, for dialogs where Esc means OK).
+    const closeX = h("button", {
+      class: "icon-btn modal-close", type: "button", title: "Close (Esc)", "aria-label": "Close",
+      html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+      onclick: () => close(escapeOk ? { ...values } : null),
+    });
+    closeX.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a title-bar drag
+    const head = h("div", { class: "modal-head" }, h("span", { class: "modal-title" }, title), closeX);
+    const modal = h("div", {
+      class: `modal${floating ? " floating" : ""}`, role: "dialog", "aria-modal": "true", "aria-label": title,
+      tabindex: "-1", style: `--w:${floating ? FLOATING_WIDTH : width}px`,
+    }, head, body, foot);
+    const backdrop = h("div", { class: `modal-backdrop${floating ? " floating" : ""}` }, modal);
+    // Sizes are remembered per kind of dialog ("Layer Style — Logo" → "Layer Style").
+    const kind = title.split(" — ")[0];
+
+    // Floating dialogs can be dragged by their title bar and resized from
+    // their left, right and bottom edges and bottom corners.
+    if (floating) {
+      head.addEventListener("pointerdown", (e) => {
+        const r = modal.getBoundingClientRect();
+        const dx = e.clientX - r.left, dy = e.clientY - r.top;
+        head.setPointerCapture(e.pointerId);
+        head.onpointermove = (ev) => {
+          floatingSpot = {
+            left: clamp(ev.clientX - dx, 0, innerWidth - 80),
+            top: clamp(ev.clientY - dy, 0, innerHeight - 40),
+          };
+          place();
+        };
+        head.onpointerup = () => {
+          head.onpointermove = head.onpointerup = null;
+          saveFrame();
+        };
+      });
+
+      for (const edge of ["l", "r", "b", "bl", "br"]) {
+        const grip = h("div", { class: `resize-grip ${edge}`, "aria-hidden": "true" });
+        grip.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const start = modal.getBoundingClientRect();
+          grip.setPointerCapture(e.pointerId);
+          document.body.classList.add("resizing-dialog");
+          grip.onpointermove = (ev) => {
+            const dx = ev.clientX - e.clientX, dy = ev.clientY - e.clientY;
+            let { left, width, height } = { left: start.left, width: start.width, height: start.height };
+            if (edge.includes("l")) {
+              width = clamp(start.width - dx, MIN_W, start.right);
+              left = start.right - width;
+            }
+            if (edge.includes("r")) width = clamp(start.width + dx, MIN_W, innerWidth - start.left);
+            if (edge.includes("b")) height = clamp(start.height + dy, MIN_H, innerHeight - start.top - 8);
+            floatingSpot = { left, top: start.top };
+            floatingSizes[kind] = { width, height: edge.includes("b") ? height : floatingSizes[kind]?.height };
+            place();
+          };
+          grip.onpointerup = () => {
+            grip.onpointermove = grip.onpointerup = null;
+            document.body.classList.remove("resizing-dialog");
+            saveFrame();
+          };
+        });
+        // Double-click a grip to go back to the size that fits the content.
+        grip.addEventListener("dblclick", () => {
+          delete floatingSizes[kind];
+          modal.style.width = modal.style.height = "";
+          saveFrame();
+          place();
+        });
+        modal.append(grip);
+      }
+    }
+    function place() {
+      if (!floating) return;
+      const size = floatingSizes[kind];
+      if (size) {
+        modal.style.width = `${Math.min(size.width, innerWidth)}px`;
+        if (size.height) modal.style.height = `${Math.min(size.height, innerHeight - 16)}px`;
+      }
+      const w = modal.offsetWidth, hh = modal.offsetHeight;
+      // By default dock top-right, but move up if that's what it takes to fit.
+      const spot = floatingSpot ?? { left: innerWidth - w - 8, top: Math.max(8, Math.min(92, innerHeight - hh - 8)) };
+      // Keep the whole panel on screen, nudging it up if it grows.
+      modal.style.left = `${clamp(spot.left, 0, Math.max(0, innerWidth - w))}px`;
+      modal.style.top = `${clamp(spot.top, 0, Math.max(0, innerHeight - hh - 8))}px`;
+    }
 
     const onKey = (e) => {
       if (isColorPickerOpen()) return; // Esc/Enter belong to the picker
       if (e.key === "Escape") {
         e.preventDefault();
-        close(null);
+        close(escapeOk ? { ...values } : null);
       } else if (e.key === "Enter" && !(e.target instanceof HTMLTextAreaElement) && !(e.target instanceof HTMLButtonElement)) {
         e.preventDefault();
         close({ ...values });
@@ -59,21 +194,36 @@ export function openDialog({
     function close(result) {
       cancelAnimationFrame(frame);
       document.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("resize", place);
+      sizeWatcher?.disconnect();
+      document.body.classList.remove("floating-dialog");
       backdrop.remove();
       resolve(result);
     }
 
     document.addEventListener("keydown", onKey, true);
     document.body.append(backdrop);
-    init?.(api);
-    const first = body.querySelector("input:not([type=checkbox]):not([type=range]), select");
-    (first ?? ok).focus();
-    first?.select?.();
+    init?.(api); // before placing: it can show/hide fields, changing the size
+    if (floating) {
+      // The rest of the editor is disabled (but the canvas can still be
+      // panned and zoomed), and nothing steals focus from Space-to-pan.
+      document.body.classList.add("floating-dialog");
+      window.addEventListener("resize", place);
+      // Re-place when the content changes size (e.g. an effect is switched on).
+      sizeWatcher = new ResizeObserver(() => place());
+      sizeWatcher.observe(modal);
+      place();
+      modal.focus();
+    } else {
+      const first = body.querySelector("input:not([type=checkbox]):not([type=range]), select");
+      (first ?? ok).focus();
+      first?.select?.();
+    }
     if (onChange) notify(null);
   });
 }
 
-function buildField(f, values, setters, notify) {
+export function buildField(f, values, setters, notify) {
   if (f.type === "heading") return h("div", { class: "field-heading" }, f.label);
   if (f.type === "custom") {
     if (f.key) values[f.key] = f.value;

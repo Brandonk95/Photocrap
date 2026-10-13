@@ -1,5 +1,5 @@
 import { createCanvas, cloneCanvas } from "./util.js";
-import { gaussianBlur } from "./filters.js";
+import { gaussianBlur, distanceTransform } from "./filters.js";
 
 const COMBINE_OPS = { add: "source-over", subtract: "destination-out", intersect: "destination-in" };
 
@@ -141,54 +141,6 @@ export class Selection {
     sel._data = img;
     return sel;
   }
-}
-
-// Exact Euclidean distance (in pixels) from every pixel to the nearest pixel
-// whose value equals `target`, using Felzenszwalb & Huttenlocher's
-// two-pass lower-envelope algorithm. O(w·h).
-function distanceTransform(values, w, h, target) {
-  const INF = 1e20;
-  const n = Math.max(w, h);
-  const f = new Float64Array(n), d = new Float64Array(n), z = new Float64Array(n + 1);
-  const v = new Int32Array(n);
-  const grid = new Float64Array(w * h);
-  for (let i = 0; i < grid.length; i++) grid[i] = values[i] === target ? 0 : INF;
-
-  const pass = (len) => {
-    let k = 0;
-    v[0] = 0;
-    z[0] = -INF;
-    z[1] = INF;
-    for (let q = 1; q < len; q++) {
-      let s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
-      while (s <= z[k]) {
-        k--;
-        s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
-      }
-      k++;
-      v[k] = q;
-      z[k] = s;
-      z[k + 1] = INF;
-    }
-    k = 0;
-    for (let q = 0; q < len; q++) {
-      while (z[k + 1] < q) k++;
-      d[q] = (q - v[k]) * (q - v[k]) + f[v[k]];
-    }
-  };
-
-  for (let x = 0; x < w; x++) {
-    for (let y = 0; y < h; y++) f[y] = grid[y * w + x];
-    pass(h);
-    for (let y = 0; y < h; y++) grid[y * w + x] = d[y];
-  }
-  for (let y = 0; y < h; y++) {
-    const row = y * w;
-    for (let x = 0; x < w; x++) f[x] = grid[row + x];
-    pass(w);
-    for (let x = 0; x < w; x++) grid[row + x] = Math.sqrt(d[x]);
-  }
-  return grid;
 }
 
 export function alphaBounds({ data, width: w, height: h }) {

@@ -187,6 +187,8 @@ export class Layer extends Surface {
     this.shape = null;      // editable vector shape (see shapes.js) or null
     this.adjustment = null; // { kind, op, params }: an adjustment layer (pixels unused)
     this.styles = null;     // layer effects (see styles.js) or null
+    this.clipped = false;   // clipped to the nearest unclipped layer below (clipping mask)
+    this.locks = null;      // { transparency, pixels, position } or null
   }
 
   get isGroup() {
@@ -284,6 +286,8 @@ export class Group {
     this.shape = null;
     this.adjustment = null;
     this.styles = null;
+    this.clipped = false;
+    this.locks = null;
   }
 
   get isGroup() {
@@ -339,6 +343,9 @@ export class Doc {
     this.layers = []; // top-level nodes (layers and groups), bottom first
     this.activeLayer = null; // a Layer or a Group
     this.selection = null;
+    this.guides = [];        // [{ axis: "x" | "y", pos }] (see guides.js)
+    this.quickMask = null;   // Quick Mask mode: { mask: LayerMask, … } (see App.toggleQuickMask)
+    this.quickOverlay = null; // red tint over what the quick mask leaves unselected
     this.layerCount = 0;
     this.groupCount = 0;
     this.composite = createCanvas(width, height);
@@ -459,7 +466,22 @@ export class Doc {
 
     this.composeList(ctx, this.layers, r, rect, live, 0);
     ctx.restore();
+    if (this.quickMask) this.composeQuickOverlay(r, live);
     return this.composite;
+  }
+
+  // Red where the quick mask is black (unselected); drawn over the image at
+  // half opacity by the view.
+  composeQuickOverlay(r, live) {
+    const o = tempCanvas("quick-overlay", this.width, this.height), oc = o.getContext("2d");
+    this.quickOverlay = o;
+    clipped(oc, r);
+    oc.fillStyle = "#ff0000";
+    oc.fillRect(r.x, r.y, r.w, r.h);
+    const alpha = this.maskAlpha(this.quickMask, r, live);
+    oc.globalCompositeOperation = "destination-out";
+    oc.drawImage(alpha.canvas, alpha.x, alpha.y);
+    oc.restore();
   }
 
   // Alpha mask to apply for a node: a canvas and where to draw it, or null.
@@ -478,61 +500,100 @@ export class Doc {
   }
 
   composeList(ctx, list, r, rect, live, depth) {
-    const { width: w, height: h } = this;
-    for (const node of list) {
-      if (!node.visible || node.opacity <= 0) continue;
-
-      if (node.isGroup) {
-        const isolate = node.blend !== "pass-through" || node.opacity < 1 || node.mask?.enabled;
-        if (!isolate) {
-          this.composeList(ctx, node.layers, r, rect, live, depth);
-          continue;
-        }
-        const g = tempCanvas(`group-${depth}`, w, h), gc = g.getContext("2d");
-        clipped(gc, r);
-        this.composeList(gc, node.layers, r, rect, live, depth + 1);
-        const alpha = this.maskAlpha(node, r, live);
-        if (alpha) {
-          gc.globalCompositeOperation = "destination-in";
-          gc.drawImage(alpha.canvas, alpha.x, alpha.y);
-        }
-        gc.restore();
-        this.draw(ctx, g, 0, 0, node.opacity, node.blend === "pass-through" ? "source-over" : node.blend);
-        continue;
-      }
-
-      if (node.adjustment) {
-        this.applyAdjustment(ctx, node, r, live, depth);
-        continue;
-      }
-
-      // A pixel layer, optionally masked and styled.
-      const lv = liveFor(live, node);
-      const styled = hasStyles(node.styles);
-      const reach = styleReach(node.styles);
-      // Effects can reach into r from outside it, so prepare a wider area.
-      const rr = reach ? clampRect({ x: r.x - reach, y: r.y - reach, w: r.w + reach * 2, h: r.h + reach * 2 }, w, h) : r;
-      let src = node.canvas, sx = node.x, sy = node.y;
-      if (lv?.pixels) {
-        src = lv.pixels(rr);
-        sx = sy = 0;
-      }
-      const alpha = this.maskAlpha(node, rr, live);
-      if (alpha || styled) {
-        const t = tempCanvas(`content-${depth}`, w, h), tc = t.getContext("2d");
-        clipped(tc, rr);
-        tc.drawImage(src, sx, sy);
-        if (alpha) {
-          tc.globalCompositeOperation = "destination-in";
-          tc.drawImage(alpha.canvas, alpha.x, alpha.y);
-        }
-        tc.restore();
-        src = t;
-        sx = sy = 0;
-      }
-      if (styled) src = renderStyled(src, node.styles, r, w, h, (name) => tempCanvas(`${name}-${depth}`, w, h));
-      this.draw(ctx, src, sx, sy, node.opacity, node.blend);
+    for (let i = 0; i < list.length; i++) {
+      const node = list[i];
+      // Layers clipped to this one follow it directly in the list.
+      let end = i + 1;
+      while (end < list.length && list[end].clipped) end++;
+      const clips = list.slice(i + 1, end).filter((n) => n.visible && n.opacity > 0);
+      i = end - 1;
+      if (!node.visible || node.opacity <= 0) continue; // hiding the base hides its clipped layers too
+      if (!clips.length) this.drawNode(ctx, node, r, rect, live, depth);
+      else if (node.adjustment) {
+        // An adjustment layer has no pixels to clip to: draw everything normally.
+        for (const n of [node, ...clips]) this.drawNode(ctx, n, r, rect, live, depth);
+      } else this.drawClippingGroup(ctx, node, clips, r, rect, live, depth);
     }
+  }
+
+  // A base layer and the layers clipped to it: the clipped layers only show
+  // where the base has pixels, and the base's opacity and blend mode apply
+  // to the whole group (as in Photoshop).
+  drawClippingGroup(ctx, base, clips, r, rect, live, depth) {
+    const { width: w, height: h } = this;
+    const t = tempCanvas(`clip-${depth}`, w, h), tc = t.getContext("2d");
+    const a = tempCanvas(`clip-alpha-${depth}`, w, h), ac = a.getContext("2d");
+    clipped(tc, r);
+    this.drawNode(tc, base, r, rect, live, depth + 1, 1, "source-over");
+    clipped(ac, r);
+    ac.drawImage(t, 0, 0); // remember the base's coverage
+    ac.restore();
+    // Make the base opaque (drawing it over itself keeps its colors), so the
+    // clipped layers blend with its full color even on soft edges...
+    for (let k = 0; k < 6; k++) tc.drawImage(t, 0, 0);
+    for (const n of clips) this.drawNode(tc, n, r, rect, live, depth + 1);
+    // ...then give the result the base's coverage back.
+    tc.globalCompositeOperation = "destination-in";
+    tc.drawImage(a, 0, 0);
+    tc.restore();
+    this.draw(ctx, t, 0, 0, base.opacity, base.blend === "pass-through" ? "source-over" : base.blend);
+  }
+
+  // Composite one node onto ctx. opacity/blend override the node's own.
+  drawNode(ctx, node, r, rect, live, depth, opacity = node.opacity, blend = node.blend) {
+    const { width: w, height: h } = this;
+    if (node.isGroup) {
+      const isolate = blend !== "pass-through" || opacity < 1 || node.mask?.enabled;
+      if (!isolate) {
+        this.composeList(ctx, node.layers, r, rect, live, depth);
+        return;
+      }
+      const g = tempCanvas(`group-${depth}`, w, h), gc = g.getContext("2d");
+      clipped(gc, r);
+      this.composeList(gc, node.layers, r, rect, live, depth + 1);
+      const alpha = this.maskAlpha(node, r, live);
+      if (alpha) {
+        gc.globalCompositeOperation = "destination-in";
+        gc.drawImage(alpha.canvas, alpha.x, alpha.y);
+      }
+      gc.restore();
+      this.draw(ctx, g, 0, 0, opacity, blend === "pass-through" ? "source-over" : blend);
+      return;
+    }
+
+    if (node.adjustment) {
+      this.applyAdjustment(ctx, node, r, live, depth);
+      return;
+    }
+
+    // A pixel layer, optionally masked and styled.
+    const lv = liveFor(live, node);
+    const styled = hasStyles(node.styles);
+    const reach = styleReach(node.styles);
+    // Effects can reach into r from outside it, so prepare a wider area.
+    const rr = reach ? clampRect({ x: r.x - reach, y: r.y - reach, w: r.w + reach * 2, h: r.h + reach * 2 }, w, h) : r;
+    let src = node.canvas, sx = node.x, sy = node.y;
+    // A tool's preview on a layer with locked transparency only shows where
+    // the layer already has pixels (the commit makes it exact).
+    const keepAlpha = !!(lv?.pixels && node.locks?.transparency);
+    if (lv?.pixels) {
+      src = lv.pixels(rr);
+      sx = sy = 0;
+    }
+    const alpha = this.maskAlpha(node, rr, live);
+    if (alpha || styled || keepAlpha) {
+      const t = tempCanvas(`content-${depth}`, w, h), tc = t.getContext("2d");
+      clipped(tc, rr);
+      tc.drawImage(src, sx, sy);
+      tc.globalCompositeOperation = "destination-in";
+      if (keepAlpha) tc.drawImage(node.canvas, node.x, node.y);
+      if (alpha) tc.drawImage(alpha.canvas, alpha.x, alpha.y);
+      tc.restore();
+      src = t;
+      sx = sy = 0;
+    }
+    if (styled) src = renderStyled(src, node.styles, r, w, h, (name) => tempCanvas(`${name}-${depth}`, w, h));
+    this.draw(ctx, src, sx, sy, opacity, blend);
   }
 
   draw(ctx, src, x, y, opacity, blend) {

@@ -4,6 +4,7 @@ import { MENUS, createCommands, comboFromEvent, formatKeys, ADJUSTMENT_KINDS, ad
 import { hasStyles } from "./styles.js";
 import { PROJECT_EXTENSION } from "./project.js";
 import { openColorPicker } from "./colorpicker.js";
+import { buildPropertiesPanel } from "./properties.js";
 
 const svg = (body) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
@@ -22,6 +23,12 @@ const UI_ICONS = {
   adjust: svg('<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/>'),
   fx: svg('<path d="M10 4H8.5A2.5 2.5 0 0 0 6 6.5V20M3 10h6M14 9l6 8M20 9l-6 8"/>'),
   chevron: svg('<path d="m9 6 6 6-6 6"/>'),
+  shape: svg('<path d="M12 3 21 20H3z" fill="currentColor" stroke="none"/>'),
+  lock: svg('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
+  lockAlpha: svg('<rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M4 4h4v4H4zM12 4h4v4h-4zM8 8h4v4H8zM16 8h4v4h-4zM4 12h4v4H4zM12 12h4v4h-4zM8 16h4v4H8zM16 16h4v4h-4z" fill="currentColor" stroke="none"/>'),
+  lockPixels: svg('<path d="M18.4 2.6a2 2 0 0 1 2.9 2.9L12 14.8 9.2 12z"/><path d="M8 13.5c-2 0-3.5 1.5-3.5 3.5 0 1.5-1 2.5-2.5 3 3 1.5 8 1 8.5-3.5z"/>'),
+  lockPosition: svg('<path d="M12 2v20M2 12h20M12 2 9 5M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3"/>'),
+  clip: svg('<path d="M5 5h6a3 3 0 0 1 3 3v12"/><path d="m10 16 4 4 4-4"/>'),
 };
 
 const isTyping = (el) =>
@@ -34,8 +41,10 @@ export function installUI(app, tools, autosave) {
   const closeMenus = buildMenubar(app, commands);
   buildToolbar(app, tools);
   buildOptionsBar(app);
+  buildPropertiesPanel(app, commands);
   buildLayersPanel(app, commands);
   buildHistoryPanel(app);
+  buildPanelResizers(app);
   buildStatusBar(app);
   bindKeyboard(app, commands, tools, closeMenus);
   bindDropAndPaste(app);
@@ -160,10 +169,15 @@ function createToolTip() {
   return api;
 }
 
+// Related tools share one toolbar button, like Photoshop: the button shows
+// the one used last, and a long press or right-click lists the others.
+// Their shortcut key cycles through them.
+const SHARED_SLOT = { ellipse: "marquee", wand: "quickselect", heal: "spotheal", gradient: "bucket" };
+
 function buildToolbar(app, tools) {
   const bar = document.getElementById("toolbar");
   const tip = createToolTip();
-  const buttons = new Map();
+  const slots = []; // { button, tools, current }
   let group = tools[0].group;
   for (const t of tools) {
     if (t.hidden) continue;
@@ -171,22 +185,95 @@ function buildToolbar(app, tools) {
       bar.append(h("div", { class: "tool-sep" }));
       group = t.group;
     }
+    const existing = SHARED_SLOT[t.id] && slots.find((s) => s.tools[0].id === SHARED_SLOT[t.id]);
+    if (existing) {
+      existing.tools.push(t);
+      existing.button.classList.add("has-more");
+      continue;
+    }
+    const slot = { tools: [t], current: t };
+    let longPress = 0, suppressClick = false;
     const b = h("button", {
       class: "tool-btn",
       type: "button",
-      "aria-label": `${t.name} (${t.key})`,
-      "aria-description": t.description,
-      html: t.icon,
       onclick: () => {
-        app.setTool(t.id);
+        if (suppressClick) {
+          suppressClick = false;
+          return;
+        }
+        app.setTool(slot.current.id);
         b.blur();
       },
     });
-    b.addEventListener("pointerenter", (e) => tip.show(t, b, e.altKey));
-    b.addEventListener("pointerleave", () => tip.hide());
-    buttons.set(t.id, b);
+    slot.button = b;
+    b.addEventListener("pointerenter", (e) => tip.show(slot.current, b, e.altKey));
+    b.addEventListener("pointerleave", () => {
+      tip.hide();
+      clearTimeout(longPress);
+    });
+    b.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (slot.tools.length > 1) openFlyout(slot);
+    });
+    b.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || slot.tools.length < 2) return;
+      longPress = setTimeout(() => {
+        suppressClick = true;
+        openFlyout(slot);
+      }, 450);
+    });
+    b.addEventListener("pointerup", () => clearTimeout(longPress));
+    slots.push(slot);
     bar.append(b);
   }
+
+  const showSlot = (slot) => {
+    const t = slot.current;
+    slot.button.innerHTML = t.icon;
+    slot.button.setAttribute("aria-label", `${t.name} (${t.key})${slot.tools.length > 1 ? " — right-click for more tools" : ""}`);
+    slot.button.setAttribute("aria-description", t.description);
+  };
+  slots.forEach(showSlot);
+
+  // The other tools of a shared button, in a little menu beside it.
+  let flyout = null;
+  function closeFlyout() {
+    flyout?.remove();
+    flyout = null;
+    document.removeEventListener("pointerdown", onOutside, true);
+    window.removeEventListener("keydown", onKey, true);
+  }
+  const onOutside = (e) => { if (!flyout?.contains(e.target)) closeFlyout(); };
+  const onKey = (e) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    closeFlyout();
+  };
+  function openFlyout(slot) {
+    closeFlyout();
+    tip.hide();
+    flyout = h("div", { class: "menu-dropdown popup tool-flyout", role: "menu" },
+      slot.tools.map((t) => h("button", {
+        class: `menu-item${t === app.tool ? " current" : ""}`, type: "button", role: "menuitem",
+        onclick: () => {
+          closeFlyout();
+          app.setTool(t.id);
+        },
+      }, h("span", { class: "flyout-icon", html: t.icon }), h("span", {}, t.name), h("span", { class: "shortcut" }, t.key))));
+    document.body.append(flyout);
+    const r = slot.button.getBoundingClientRect();
+    flyout.style.left = `${r.right + 6}px`;
+    flyout.style.top = `${Math.max(8, Math.min(r.top, innerHeight - flyout.offsetHeight - 8))}px`;
+    setTimeout(() => {
+      document.addEventListener("pointerdown", onOutside, true);
+      window.addEventListener("keydown", onKey, true);
+    });
+  }
+
+  app.on("reset-layout", () => {
+    for (const slot of slots) slot.current = slot.tools.includes(app.tool) ? app.tool : slot.tools[0];
+    slots.forEach(showSlot);
+  });
 
   const pick = (which, button, title) => openColorPicker({
     anchor: button,
@@ -199,6 +286,24 @@ function buildToolbar(app, tools) {
   const swap = h("button", { class: "swatch-mini swap", type: "button", title: "Swap colors (X)", html: "⇄", onclick: () => app.swapColors() });
   const reset = h("button", { class: "swatch-mini reset", type: "button", title: "Default colors (D)", onclick: () => app.resetColors() });
   bar.append(h("div", { class: "swatches" }, bg, fg, swap, reset));
+  // Quick Mask mode (Q), under the colors like Photoshop.
+  const quick = h("button", {
+    class: "tool-btn quick-mask-btn", type: "button", "aria-label": "Quick Mask mode (Q)", title: "Edit in Quick Mask mode (Q)",
+    html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="4" stroke-dasharray="2 1.8"/></svg>',
+    onclick: () => {
+      app.toggleQuickMask();
+      quick.blur();
+    },
+  });
+  bar.append(quick);
+  const syncQuick = () => {
+    const on = !!app.doc?.quickMask;
+    quick.classList.toggle("active", on);
+    quick.title = on ? "Exit Quick Mask mode (Q)" : "Edit in Quick Mask mode (Q)";
+  };
+  app.on("history", syncQuick);
+  app.on("doc", syncQuick);
+
 
   const syncColors = () => {
     fg.style.background = app.fg;
@@ -206,29 +311,43 @@ function buildToolbar(app, tools) {
   };
   app.on("colors", syncColors);
   syncColors();
-  app.on("tool", () => buttons.forEach((b, id) => b.classList.toggle("active", id === app.tool.id)));
+  app.on("tool", () => {
+    for (const slot of slots) {
+      const has = slot.tools.includes(app.tool);
+      if (has && slot.current !== app.tool) {
+        slot.current = app.tool;
+        showSlot(slot);
+      }
+      slot.button.classList.toggle("active", has);
+    }
+  });
 }
 
 // ---------- Options bar ----------
 
 function buildOptionsBar(app) {
   const bar = document.getElementById("optionsbar");
-  let showingMask = null;
+  let badge = null; // "quick" | "mask" | null
+  const badgeFor = () => (!app.doc ? null : app.doc.quickMask ? "quick" : app.target().isMask ? "mask" : null);
   const render = () => {
     const t = app.tool;
-    showingMask = !!app.doc && app.target().isMask;
+    badge = badgeFor();
     bar.replaceChildren(
       h("div", { class: "opt-tool", html: t.icon }, h("span", {}, t.name),
-        showingMask ? h("span", { class: "mask-badge", title: "Painting affects the layer mask: black hides, white reveals" }, "Editing mask") : null),
-      ...(t.options ?? []).map((o) => renderOption(app, t, o, render)),
+        badge === "mask" ? h("span", { class: "mask-badge", title: "Painting affects the layer mask: black hides, white reveals" }, "Editing mask") : null,
+        badge === "quick" ? h("span", { class: "mask-badge quick", title: "Paint white to select, black to deselect. Press Q to turn it back into a selection." }, "Quick Mask") : null),
+      // Options can depend on other settings (e.g. corner radius only for rectangles).
+      ...(t.options ?? []).filter((o) => !o.when || o.when(t.settings)).map((o) => renderOption(app, t, o, render)),
     );
   };
   app.on("tool", render);
   app.on("options", render);
-  // Undo/redo can add or remove a mask; only rebuild when the badge changes.
-  app.on("layers", () => {
-    if (app.doc && app.target().isMask !== showingMask) render();
-  });
+  // Undo/redo can add or remove a mask or Quick Mask; only rebuild when the badge changes.
+  const sync = () => {
+    if (badgeFor() !== badge) render();
+  };
+  app.on("layers", sync);
+  app.on("history", sync);
 }
 
 function renderOption(app, tool, o, rerender) {
@@ -266,7 +385,7 @@ function renderOption(app, tool, o, rerender) {
     }
     case "checkbox":
       return h("label", { class: "opt opt-check" },
-        h("input", { type: "checkbox", checked: !!s[o.key], onchange: (e) => { s[o.key] = e.target.checked; changed(); } }),
+        h("input", { type: "checkbox", checked: !!s[o.key], onchange: (e) => { s[o.key] = e.target.checked; changed(); rerender(); } }),
         o.label);
     case "select":
       return h("label", { class: "opt" }, h("span", {}, o.label),
@@ -293,7 +412,7 @@ function renderOption(app, tool, o, rerender) {
           },
         }),
       });
-      return h("label", { class: "opt" }, h("span", {}, o.label), swatch);
+      return o.label ? h("label", { class: "opt" }, h("span", {}, o.label), swatch) : swatch;
     }
     case "action":
       return h("button", { type: "button", class: o.primary ? "btn-s primary" : "btn-s", onclick: () => o.run(app) }, o.label);
@@ -376,9 +495,23 @@ function buildLayersPanel(app, commands) {
     action(UI_ICONS.duplicate, "Duplicate", "layer.duplicate"),
     action(UI_ICONS.trash, "Delete", "layer.delete"));
 
+  // Lock buttons: transparent pixels, image pixels, position, everything.
+  const lockButton = (kind, icon, title) => h("button", {
+    class: "icon-btn lock-btn", type: "button", title, "aria-label": title, "aria-pressed": "false",
+    "data-lock": kind, html: icon,
+    onclick: () => app.toggleLock(app.doc.activeLayer, kind),
+  });
+  const locks = h("div", { class: "layer-locks" },
+    h("span", { class: "locks-label" }, "Lock"),
+    lockButton("transparency", UI_ICONS.lockAlpha, "Lock transparent pixels — paint only where the layer already has pixels"),
+    lockButton("pixels", UI_ICONS.lockPixels, "Lock image pixels — no painting or editing"),
+    lockButton("position", UI_ICONS.lockPosition, "Lock position — can't be moved"),
+    lockButton("all", UI_ICONS.lock, "Lock all (Ctrl+/)"));
+
   panel.append(
     h("div", { class: "panel-head" }, "Layers"),
     h("div", { class: "layer-props" }, blend, h("label", { class: "opacity" }, opacity, opacityLabel)),
+    locks,
     list,
     actions);
 
@@ -461,6 +594,17 @@ function buildLayersPanel(app, commands) {
       },
     });
     drawThumb(thumb, layer, app.doc);
+    if (layer.shape) {
+      // Shape layers get a badge; double-clicking selects the Pen tool to edit the path.
+      return h("span", {
+        class: "thumb-wrap", title: "Shape layer — double-click to edit its path with the Pen tool",
+        ondblclick: (e) => {
+          e.stopPropagation();
+          app.setActiveLayer(layer);
+          app.setTool("pen");
+        },
+      }, thumb, h("span", { class: "type-badge shape-badge", html: UI_ICONS.shape }));
+    }
     if (!layer.text) return thumb;
     // Type layers get a "T" badge; double-clicking the thumbnail edits the text.
     return h("span", {
@@ -539,13 +683,32 @@ function buildLayersPanel(app, commands) {
         },
       }, "fx")
       : null;
+    // Clipping: clipped layers get an arrow pointing down at their base,
+    // whose name is underlined (as in Photoshop).
+    const siblings = app.doc.siblingsOf(layer), index = siblings.indexOf(layer);
+    const isClipped = layer.clipped && index > 0;
+    const isBase = !isClipped && !!siblings[index + 1]?.clipped && !layer.adjustment;
+    const clipMark = isClipped ? h("span", { class: "clip-mark", title: `Clipped to “${app.clipBase(layer)?.name}”`, html: UI_ICONS.clip }) : null;
+    if (isBase) name.classList.add("clip-base");
+    const lk = layer.locks;
+    const lockMark = lk
+      ? h("span", {
+        class: `lock-mark${lk.transparency && lk.pixels && lk.position ? " full" : ""}`,
+        title: `Locked: ${[lk.transparency && "transparency", lk.pixels && "pixels", lk.position && "position"].filter(Boolean).join(", ")}`,
+        html: UI_ICONS.lock,
+      })
+      : null;
     const li = h("li", {
-      class: `layer-row${active ? " active" : ""}${app.doc.isVisible(layer) ? "" : " is-hidden"}${layer.isGroup ? " group" : ""}`,
+      class: `layer-row${active ? " active" : ""}${app.doc.isVisible(layer) ? "" : " is-hidden"}${layer.isGroup ? " group" : ""}${isClipped ? " clipped" : ""}`,
       style: `padding-left:${6 + depth * 16}px`,
       draggable: "true",
-      onclick: () => app.setActiveLayer(layer),
-    }, eye, twisty, thumbFor(layer, active), maskThumbFor(layer, active),
-    h("div", { class: "layer-text" }, name, metaText ? h("span", { class: "layer-meta" }, metaText) : null), fx);
+      title: index > 0 || layer.clipped ? "Alt+click to clip to the layer below (or release)" : null,
+      onclick: (e) => {
+        app.setActiveLayer(layer);
+        if (e.altKey) app.toggleClipping(layer);
+      },
+    }, eye, twisty, clipMark, thumbFor(layer, active), maskThumbFor(layer, active),
+    h("div", { class: "layer-text" }, name, metaText ? h("span", { class: "layer-meta" }, metaText) : null), fx, lockMark);
 
     li.addEventListener("dblclick", (e) => {
       if (e.target.closest(".eye, .twisty, .fx-badge") || app.busy) return;
@@ -606,6 +769,12 @@ function buildLayersPanel(app, commands) {
       opacityLabel.textContent = `${opacity.value}%`;
     }
     list.replaceChildren(...rows(doc.layers, active, 0));
+    const l = active.locks ?? {};
+    const on = { ...l, all: !!(l.transparency && l.pixels && l.position) };
+    for (const b of locks.querySelectorAll("[data-lock]")) {
+      b.classList.toggle("on", !!on[b.dataset.lock]);
+      b.setAttribute("aria-pressed", String(!!on[b.dataset.lock]));
+    }
     for (const b of actions.querySelectorAll("[data-cmd]")) {
       const cmd = commands[b.dataset.cmd];
       b.disabled = cmd.enabled ? !cmd.enabled() : false;
@@ -615,6 +784,290 @@ function buildLayersPanel(app, commands) {
   app.on("layers", render);
   app.on("doc", render);
 }
+
+// ---------- Resizable panels ----------
+
+// Drag the side column's left edge to change its width, the line between
+// Layers and History to share the height, the toolbar's right edge to lay
+// the tools out in 1–3 columns, and the options bar's bottom edge to give
+// its controls more rows. Double-click any handle to reset. Remembered
+// across visits.
+const PANELS_KEY = "photocrap:panels";
+const TOOL_W = 36, TOOL_GAP = 2, TOOLBAR_PAD = 12;
+const toolbarWidth = (cols) => TOOLBAR_PAD + cols * TOOL_W + (cols - 1) * TOOL_GAP;
+const OPTIONS_H = 44, OPTIONS_MIN = 34, OPTIONS_MAX = 160, OPTIONS_WRAP = 64;
+const TOOLBAR_FOLDED = 18, OPTIONS_FOLDED = 14;
+
+function buildPanelResizers(app) {
+  const appEl = document.querySelector(".app");
+  const main = document.querySelector(".main");
+  const panels = document.getElementById("panels");
+  const layers = document.getElementById("layers-panel");
+  const history = document.getElementById("history-panel");
+  const properties = document.getElementById("properties-panel");
+  const toolbar = document.getElementById("toolbar");
+  const optionsbar = document.getElementById("optionsbar");
+  const root = document.documentElement;
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(PANELS_KEY)) ?? {}; } catch { /* nothing saved */ }
+  const save = () => {
+    try { localStorage.setItem(PANELS_KEY, JSON.stringify(saved)); } catch { /* ignore */ }
+  };
+  const setVar = (name, px) => {
+    if (px) root.style.setProperty(name, `${px}px`);
+    else root.style.removeProperty(name);
+  };
+
+  const applyWidth = () => setVar("--panels-w", saved.width);
+  // History keeps a fixed share; Layers takes the rest.
+  const applySplit = () => {
+    if (saved.layers && !saved.collapsed?.layers && !saved.collapsed?.history) {
+      const max = Math.max(120, panels.clientHeight - 90);
+      layers.style.flex = `0 0 ${Math.min(saved.layers, max)}px`;
+      history.style.flex = "1 1 0";
+    } else {
+      layers.style.flex = history.style.flex = "";
+    }
+  };
+  // autoCols: when one column of tools doesn't fit the window's height, the
+  // toolbar adds columns on its own (not saved), so it doesn't need to scroll.
+  let autoCols = 1;
+  const applyToolCols = () => {
+    const folded = !!saved.collapsed?.toolbar;
+    const cols = saved.toolCols ?? autoCols;
+    setVar("--toolbar-w", folded ? TOOLBAR_FOLDED : cols > 1 ? toolbarWidth(cols) : 0);
+    toolbar.style.setProperty("--tool-cols", cols);
+    toolbar.classList.toggle("multi", cols > 1 && !folded);
+    toolbar.classList.toggle("folded", folded);
+    toolHandle.hidden = folded;
+    toolToggle.title = folded ? "Show the toolbar (Shift+Tab)" : "Hide the toolbar (Shift+Tab)";
+    toolToggle.setAttribute("aria-expanded", String(!folded));
+  };
+  // The fewest columns (up to 3) that fit, found by laying the toolbar out
+  // each way for a moment (nothing is painted in between).
+  const fitToolbar = () => {
+    if (saved.toolCols || saved.collapsed?.toolbar) return;
+    const multi = toolbar.classList.contains("multi"), cols = toolbar.style.getPropertyValue("--tool-cols");
+    let need = 3;
+    for (let c = 1; c <= 3; c++) {
+      toolbar.classList.toggle("multi", c > 1);
+      toolbar.style.setProperty("--tool-cols", c);
+      if (toolbar.scrollHeight <= toolbar.clientHeight + 1) {
+        need = c;
+        break;
+      }
+    }
+    toolbar.classList.toggle("multi", multi);
+    toolbar.style.setProperty("--tool-cols", cols);
+    if (autoCols !== need) {
+      autoCols = need;
+      applyToolCols();
+    }
+  };
+  // Tall enough for a second row: controls wrap instead of scrolling sideways.
+  const applyOptionsHeight = () => {
+    const folded = !!saved.collapsed?.options;
+    setVar("--options-h", folded ? OPTIONS_FOLDED : saved.optionsH);
+    optionsbar.classList.toggle("wrap", !folded && (saved.optionsH ?? OPTIONS_H) >= OPTIONS_WRAP);
+    optionsbar.inert = folded;
+    document.body.classList.toggle("options-folded", folded);
+    optionsHandle.hidden = folded;
+    optionsToggle.title = folded ? "Show the options bar" : "Hide the options bar";
+    optionsToggle.setAttribute("aria-expanded", String(!folded));
+  };
+
+  function handle(cls, axis, title, onMove, onReset) {
+    const el = h("div", { class: cls, title: `${title} · double-click to reset`, role: "separator", "aria-orientation": axis === "cols" ? "vertical" : "horizontal" });
+    el.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try { el.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+      el.classList.add("dragging");
+      document.body.classList.add("resizing-panels", axis);
+      el.onpointermove = (ev) => onMove(ev);
+      el.onpointerup = el.onpointercancel = () => {
+        el.onpointermove = el.onpointerup = el.onpointercancel = null;
+        el.classList.remove("dragging");
+        document.body.classList.remove("resizing-panels", axis);
+        save();
+      };
+    });
+    el.addEventListener("dblclick", () => {
+      onReset();
+      save();
+    });
+    return el;
+  }
+
+  const widthHandle = handle("panels-resizer", "cols", "Drag to resize the panels", (ev) => {
+    saved.width = Math.round(clamp(panels.getBoundingClientRect().right - ev.clientX, 220, Math.min(560, innerWidth * 0.5)));
+    applyWidth();
+  }, () => { delete saved.width; applyWidth(); });
+
+  const divider = handle("panel-divider", "rows", "Drag to resize", (ev) => {
+    saved.layers = Math.round(clamp(ev.clientY - layers.getBoundingClientRect().top, 120, panels.clientHeight - 90));
+    applySplit();
+  }, () => { delete saved.layers; applySplit(); });
+
+  // Snaps to whole columns of tool buttons.
+  const toolHandle = handle("toolbar-resizer", "cols", "Drag to show the tools in more columns", (ev) => {
+    const w = ev.clientX - toolbar.getBoundingClientRect().left;
+    const cols = clamp(Math.round((w - TOOLBAR_PAD + TOOL_GAP) / (TOOL_W + TOOL_GAP)), 1, 3);
+    if (cols > 1) saved.toolCols = cols;
+    else delete saved.toolCols;
+    applyToolCols();
+    fitToolbar();
+  }, () => { delete saved.toolCols; applyToolCols(); fitToolbar(); });
+
+  const optionsHandle = handle("optionsbar-resizer", "rows", "Drag to resize the options bar", (ev) => {
+    const hgt = Math.round(clamp(ev.clientY - optionsbar.getBoundingClientRect().top, OPTIONS_MIN, OPTIONS_MAX));
+    if (Math.abs(hgt - OPTIONS_H) < 4) delete saved.optionsH; // snap to the default
+    else saved.optionsH = hgt;
+    applyOptionsHeight();
+  }, () => { delete saved.optionsH; applyOptionsHeight(); });
+
+  // ---- Collapsing ----
+  // Click a panel's title to fold it down to just the title; the other one
+  // takes the space. The column's collapse button (or Tab) folds the whole
+  // column into a slim strip; click a name there to bring it back.
+  saved.collapsed ??= {};
+  const col = saved.collapsed;
+  const narrow = matchMedia("(max-width: 900px)"); // the column is a slide-over there
+  const panelHeads = [];
+  const applyCollapsed = () => {
+    for (const [panel, key, head] of panelHeads) {
+      panel.classList.toggle("collapsed", !!col[key]);
+      head.setAttribute("aria-expanded", String(!col[key]));
+    }
+    divider.hidden = !!(col.layers || col.history);
+    document.body.classList.toggle("panels-collapsed", !!col.column);
+    applySplit();
+  };
+  const setColumn = (collapsed) => {
+    if (narrow.matches) {
+      document.body.classList.toggle("panels-open", !collapsed);
+      return;
+    }
+    if (collapsed) col.column = true;
+    else delete col.column;
+    applyCollapsed();
+    save();
+  };
+  const togglePanel = (key) => {
+    if (col[key]) delete col[key];
+    else col[key] = true;
+    applyCollapsed();
+    save();
+  };
+
+  for (const [panel, key] of [[properties, "properties"], [layers, "layers"], [history, "history"]]) {
+    const head = panel.querySelector(".panel-head");
+    head.classList.add("collapsible");
+    head.tabIndex = 0;
+    head.setAttribute("role", "button");
+    head.title = "Click to collapse or expand";
+    head.prepend(h("span", { class: "panel-chev", html: UI_ICONS.chevron }));
+    head.addEventListener("click", (e) => {
+      if (!e.target.closest(".panel-head-btn")) togglePanel(key);
+    });
+    head.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      togglePanel(key);
+    });
+    panelHeads.push([panel, key, head]);
+  }
+  properties.querySelector(".panel-head").append(h("button", {
+    class: "icon-btn panel-head-btn", type: "button", title: "Collapse panels (Tab)", "aria-label": "Collapse panels",
+    html: UI_ICONS.chevron, onclick: () => setColumn(true),
+  }));
+
+  const stripItem = (key, label) => h("button", {
+    class: "strip-item", type: "button", title: `Show ${label}`,
+    onclick: () => {
+      delete col[key];
+      setColumn(false);
+    },
+  }, label);
+  const strip = h("div", { class: "panels-strip" },
+    h("button", { class: "icon-btn strip-expand", type: "button", title: "Expand panels (Tab)", "aria-label": "Expand panels", html: UI_ICONS.chevron, onclick: () => setColumn(false) }),
+    stripItem("properties", "Properties"), stripItem("layers", "Layers"), stripItem("history", "History"));
+
+  // The toolbar folds to a thin strip; tool shortcuts keep working.
+  const setToolbar = (folded) => {
+    if (folded) col.toolbar = true;
+    else delete col.toolbar;
+    applyToolCols();
+    save();
+  };
+  const toolToggle = h("button", {
+    class: "toolbar-toggle", type: "button", "aria-label": "Show or hide the toolbar",
+    html: UI_ICONS.chevron, onclick: () => setToolbar(!col.toolbar),
+  });
+  toolbar.prepend(toolToggle);
+  app.on("toggle-toolbar", () => setToolbar(!col.toolbar));
+  app.on("toggle-properties", () => {
+    if (col.column) setColumn(false);
+    togglePanel("properties");
+  });
+
+  // The options bar folds to a thin strip; click the strip to bring it back.
+  // The button lives outside the bar, which re-renders for every tool.
+  const setOptions = (folded) => {
+    if (folded) col.options = true;
+    else delete col.options;
+    applyOptionsHeight();
+    save();
+  };
+  const optionsToggle = h("button", {
+    class: "optionsbar-toggle", type: "button", "aria-label": "Show or hide the options bar",
+    html: UI_ICONS.chevron, onclick: () => setOptions(!col.options),
+  });
+  appEl.append(optionsToggle);
+  app.on("toggle-options", () => setOptions(!col.options));
+
+  app.on("toggle-panels", () => setColumn(narrow.matches ? document.body.classList.contains("panels-open") : !col.column));
+  // Tab (panels) and Shift+Tab (toolbar) like Photoshop, but only when
+  // nothing has focus so keyboard navigation between controls still works.
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab" || e.ctrlKey || e.metaKey || e.altKey) return;
+    const focused = document.activeElement;
+    if (focused && focused !== document.body) return;
+    if (document.querySelector(".modal-backdrop") || app.busy) return;
+    e.preventDefault();
+    app.emit(e.shiftKey ? "toggle-toolbar" : "toggle-panels");
+  });
+
+  panels.append(strip);
+  panels.prepend(widthHandle);
+  panels.insertBefore(divider, history);
+  applyCollapsed();
+  // These live outside their bars, which scroll and would carry them along.
+  main.append(toolHandle);
+  appEl.append(optionsHandle);
+  applyWidth();
+  applySplit();
+  applyToolCols();
+  applyOptionsHeight();
+  window.addEventListener("resize", applySplit);
+  new ResizeObserver(() => fitToolbar()).observe(toolbar);
+  fitToolbar();
+
+  // View › Reset Layout: everything back to how it ships.
+  app.on("reset-layout", () => {
+    for (const k of Object.keys(saved)) if (k !== "collapsed") delete saved[k];
+    for (const k of Object.keys(col)) delete col[k];
+    autoCols = 1;
+    document.body.classList.remove("panels-open");
+    applyWidth();
+    applyCollapsed();
+    applyToolCols();
+    applyOptionsHeight();
+    save();
+    fitToolbar();
+  });
+}
+
 // ---------- History panel ----------
 
 function buildHistoryPanel(app) {
@@ -701,7 +1154,23 @@ function bindKeyboard(app, commands, tools, closeMenus) {
   let altDown = false;
 
   window.addEventListener("keydown", (ev) => {
-    if (document.querySelector(".modal-backdrop") || isTyping(ev.target)) return;
+    if (isTyping(ev.target)) return;
+    const dialog = document.querySelector(".modal-backdrop");
+    if (dialog) {
+      // Floating (preview) dialogs still allow looking around the image.
+      if (!dialog.classList.contains("floating")) return;
+      if (ev.code === "Space") {
+        ev.preventDefault();
+        if (!ev.repeat) app.setSpace(true);
+        return;
+      }
+      const viewCmd = byCombo.get(comboFromEvent(ev));
+      if (viewCmd && Object.entries(commands).some(([id, c]) => c === viewCmd && id.startsWith("view."))) {
+        ev.preventDefault();
+        viewCmd.run();
+      }
+      return;
+    }
     if (ev.key === "Escape") {
       closeMenus();
       if (app.gesture) {

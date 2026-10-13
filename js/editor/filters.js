@@ -419,3 +419,173 @@ export function histogram(img, channel = "rgb") {
   }
   return hist;
 }
+
+// Exact Euclidean distance (in pixels) from every pixel to the nearest pixel
+// whose value equals `target`, using Felzenszwalb & Huttenlocher's
+// two-pass lower-envelope algorithm. O(w·h).
+export function distanceTransform(values, w, h, target) {
+  const INF = 1e20;
+  const n = Math.max(w, h);
+  const f = new Float64Array(n), d = new Float64Array(n), z = new Float64Array(n + 1);
+  const v = new Int32Array(n);
+  const grid = new Float64Array(w * h);
+  for (let i = 0; i < grid.length; i++) grid[i] = values[i] === target ? 0 : INF;
+
+  const pass = (len) => {
+    let k = 0;
+    v[0] = 0;
+    z[0] = -INF;
+    z[1] = INF;
+    for (let q = 1; q < len; q++) {
+      let s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+      while (s <= z[k]) {
+        k--;
+        s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+      }
+      k++;
+      v[k] = q;
+      z[k] = s;
+      z[k + 1] = INF;
+    }
+    k = 0;
+    for (let q = 0; q < len; q++) {
+      while (z[k + 1] < q) k++;
+      d[q] = (q - v[k]) * (q - v[k]) + f[v[k]];
+    }
+  };
+
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) f[y] = grid[y * w + x];
+    pass(h);
+    for (let y = 0; y < h; y++) grid[y * w + x] = d[y];
+  }
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) f[x] = grid[row + x];
+    pass(w);
+    for (let x = 0; x < w; x++) grid[row + x] = Math.sqrt(d[x]);
+  }
+  return grid;
+}
+
+
+// ---------- Refine Edge ----------
+
+// Blur interleaved 4-channel floats in place (Gaussian via box passes).
+function blur4(a, w, h, sigma) {
+  if (sigma < 0.3) return a;
+  const b = new Float32Array(a.length);
+  for (const box of boxSizes(sigma, 3)) {
+    const r = (box - 1) / 2;
+    if (r < 1) continue;
+    boxBlurH(a, b, w, h, r);
+    boxBlurV(b, a, w, h, r);
+  }
+  return a;
+}
+
+// Blur one float channel (0–1) by packing it into the 4-channel blur.
+function blur1(v, w, h, sigma) {
+  if (sigma < 0.3) return v;
+  const a = new Float32Array(v.length * 4);
+  for (let i = 0; i < v.length; i++) a[i * 4] = v[i];
+  blur4(a, w, h, sigma);
+  for (let i = 0; i < v.length; i++) v[i] = a[i * 4];
+  return v;
+}
+
+// Refine a selection against the image it was made on, like Photoshop's
+// Select and Mask. `img` is the image; params.sel is the selection as an
+// ImageData whose alpha is the selection. Returns an ImageData (white,
+// alpha = refined selection). Steps, in order:
+//   shift    move the edge out (+) or in (−), in pixels
+//   radius   width of the band around the edge where alpha is re-estimated
+//            from the colors (hair, fur, soft edges): each band pixel is
+//            placed between the nearby foreground and background colors
+//   smooth   round off jagged edges (0–100)
+//   feather  blur the edge, in pixels
+//   contrast sharpen soft edges (0–100)
+export function refineEdge(img, { sel, shift = 0, radius = 0, smooth = 0, feather = 0, contrast = 0 }) {
+  const { width: w, height: h, data: C } = img;
+  const n = w * h;
+  const S = sel.data;
+  let alpha = new Float32Array(n);
+  for (let i = 0; i < n; i++) alpha[i] = S[i * 4 + 3] / 255;
+
+  if (shift) alpha = shiftEdge(alpha, w, h, shift);
+
+  if (radius > 0) {
+    const inside = new Uint8Array(n);
+    for (let i = 0; i < n; i++) inside[i] = alpha[i] >= 0.5 ? 1 : 0;
+    const toOutside = distanceTransform(inside, w, h, 0); // for inside pixels: distance to the edge
+    const toInside = distanceTransform(inside, w, h, 1);  // for outside pixels
+    // Known foreground / background: beyond half the radius from the edge.
+    const fg = new Float32Array(n * 4), bg = new Float32Array(n * 4);
+    const known = radius / 2;
+    for (let i = 0; i < n; i++) {
+      const k = i * 4;
+      const target = inside[i] ? (toOutside[i] > known ? fg : null) : (toInside[i] > known ? bg : null);
+      if (!target) continue;
+      target[k] = C[k];
+      target[k + 1] = C[k + 1];
+      target[k + 2] = C[k + 2];
+      target[k + 3] = 1;
+    }
+    // Average nearby known colors (normalized convolution).
+    blur4(fg, w, h, radius);
+    blur4(bg, w, h, radius);
+    for (let i = 0; i < n; i++) {
+      const d = inside[i] ? toOutside[i] : toInside[i];
+      if (d > radius) continue; // outside the band: keep as is
+      const k = i * 4;
+      const wf = fg[k + 3], wb = bg[k + 3];
+      if (wf < 1e-3 || wb < 1e-3) continue;
+      const fr = fg[k] / wf, fgg = fg[k + 1] / wf, fb = fg[k + 2] / wf;
+      const br = bg[k] / wb, bgg = bg[k + 1] / wb, bb = bg[k + 2] / wb;
+      const dr = fr - br, dg = fgg - bgg, db = fb - bb;
+      const len2 = dr * dr + dg * dg + db * db;
+      if (len2 < 400) continue; // foreground and background look alike: no information
+      const a = ((C[k] - br) * dr + (C[k + 1] - bgg) * dg + (C[k + 2] - bb) * db) / len2;
+      // Trust the color estimate more where the two colors differ a lot.
+      const trust = Math.min(1, (len2 - 400) / 2000);
+      alpha[i] = alpha[i] * (1 - trust) + Math.max(0, Math.min(1, a)) * trust;
+    }
+  }
+
+  if (smooth > 0) {
+    blur1(alpha, w, h, smooth / 25);
+    // Re-harden what the blur softened, so smoothing rounds the edge off
+    // rather than feathering it.
+    const k = 1 + smooth / 50;
+    for (let i = 0; i < n; i++) alpha[i] = (alpha[i] - 0.5) * k + 0.5;
+  }
+  if (feather > 0) blur1(alpha, w, h, feather / 2);
+  if (contrast > 0) {
+    const k = 1 / (1 - 0.95 * (contrast / 100));
+    for (let i = 0; i < n; i++) alpha[i] = (alpha[i] - 0.5) * k + 0.5;
+  }
+
+  const out = new ImageData(w, h);
+  const o = out.data;
+  for (let i = 0; i < n; i++) {
+    const k = i * 4;
+    o[k] = o[k + 1] = o[k + 2] = 255;
+    o[k + 3] = Math.max(0, Math.min(1, alpha[i])) * 255;
+  }
+  return out;
+}
+
+// Move a selection's edge by `px` pixels (anti-aliased).
+function shiftEdge(alpha, w, h, px) {
+  const n = w * h;
+  const inside = new Uint8Array(n);
+  for (let i = 0; i < n; i++) inside[i] = alpha[i] >= 0.5 ? 1 : 0;
+  // Signed distance to the edge: positive inside.
+  const out = distanceTransform(inside, w, h, 0), inn = distanceTransform(inside, w, h, 1);
+  const res = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const d = inside[i] ? out[i] - 0.5 : 0.5 - inn[i];
+    res[i] = Math.max(0, Math.min(1, d + px + 0.5));
+  }
+  return res;
+}
