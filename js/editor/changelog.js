@@ -8,6 +8,14 @@ import { kvGet } from "../storage.js";
 
 export const CHANGELOG = [
   {
+    version: "0.13.1",
+    title: "Fast adjustment layers",
+    notes: [
+      "Adjustment layers (Curves, Levels, Hue/Saturation and the rest) now run on the graphics card. Images with adjustment layers no longer lag while you paint, move layers or drag a curve — even on large photos.",
+      "Selecting an adjustment layer no longer stalls while its histogram is drawn, and the histogram now shows the image under the adjustment, as intended.",
+    ],
+  },
+  {
     version: "0.13.0",
     title: "A much better Shape tool",
     notes: [

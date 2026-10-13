@@ -5,7 +5,7 @@
 
 import { h } from "./util.js";
 import { buildField } from "./dialogs.js";
-import { adjustmentFields, adjustmentLabel } from "./commands.js";
+import { adjustmentFields, adjustmentLabel, histogramSource } from "./commands.js";
 import { renderText } from "./text.js";
 import { renderShape, withLive } from "./shapes.js";
 
@@ -181,7 +181,7 @@ export function buildPropertiesPanel(app, commands) {
   function adjustmentSection(layer) {
     const { kind, op } = layer.adjustment;
     // Histograms show the image under the adjustment.
-    const src = app.doc.compose().getContext("2d").getImageData(0, 0, app.doc.width, app.doc.height);
+    const src = histogramSource(app, layer);
     const fields = adjustmentFields(kind, src, layer.adjustment.params);
     if (!fields) return h("p", { class: "props-note" }, `${adjustmentLabel(kind)} has no settings.`);
     return section(null, fields, (v) => edit(`Edit ${adjustmentLabel(kind)}`, [], () => {

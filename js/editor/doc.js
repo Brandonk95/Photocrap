@@ -2,6 +2,7 @@ import { createCanvas, cloneCanvas, clampRect, unionRect } from "./util.js";
 import { alphaBounds } from "./selection.js";
 import * as Filters from "./filters.js";
 import { renderStyled, hasStyles } from "./styles.js";
+import { gpuAdjust } from "./gpu-adjust.js";
 
 let nextLayerId = 1;
 
@@ -608,13 +609,14 @@ export class Doc {
   // then lay the result back over it through the layer's mask and opacity.
   applyAdjustment(ctx, node, r, live, depth) {
     const { op, params } = node.adjustment;
-    if (!params || !Filters[op]) return;
+    if (!params || !Filters[op] || !r.w || !r.h) return;
     const { width: w, height: h } = this;
-    const below = ctx.getImageData(r.x, r.y, r.w, r.h);
-    const adjusted = Filters[op](below, params);
     const t = tempCanvas(`adjust-${depth}`, w, h), tc = t.getContext("2d");
     clipped(tc, r);
-    tc.putImageData(adjusted, r.x, r.y);
+    // On the GPU when possible: reading the composite back is the slow part.
+    const gpu = gpuAdjust(ctx.canvas, r, op, params);
+    if (gpu) tc.drawImage(gpu, 0, 0, r.w, r.h, r.x, r.y, r.w, r.h);
+    else tc.putImageData(Filters[op](ctx.getImageData(r.x, r.y, r.w, r.h), params), r.x, r.y);
     const alpha = this.maskAlpha(node, r, live);
     if (alpha) {
       tc.globalCompositeOperation = "destination-in";

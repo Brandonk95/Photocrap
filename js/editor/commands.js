@@ -448,6 +448,23 @@ export function adjustmentFields(kind, src, params) {
   return def?.fields ? seedFields(def.fields(src), params) : null;
 }
 
+// Pixels for an adjustment layer's histograms: the image under it, scaled
+// down. A histogram doesn't need every pixel, and reading a full-size image
+// back from the GPU is slow.
+export function histogramSource(app, layer) {
+  const doc = app.doc, visible = layer.visible;
+  layer.visible = false;
+  const flat = doc.compose();
+  layer.visible = visible;
+  app.requestRender(); // compose() reused the on-screen composite
+  const s = Math.min(1, 1024 / Math.max(doc.width, doc.height));
+  const c = createCanvas(Math.max(1, Math.round(doc.width * s)), Math.max(1, Math.round(doc.height * s)));
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = false; // sample real pixel values, not blends of them
+  ctx.drawImage(flat, 0, 0, c.width, c.height);
+  return ctx.getImageData(0, 0, c.width, c.height);
+}
+
 // Start dialog fields from previously chosen values.
 function seedFields(fields, params) {
   if (!params) return fields;
@@ -481,7 +498,7 @@ async function adjustmentLayer(app, kind, existing = null) {
     return;
   }
   const before = layer.adjustment;
-  const src = doc.compose().getContext("2d").getImageData(0, 0, doc.width, doc.height); // for histograms
+  const src = histogramSource(app, layer);
   const values = await openDialog({
     title: label,
     width: def.width,
